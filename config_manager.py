@@ -21,6 +21,8 @@ DEFAULT_CONFIG = {
     "merge_max_height_ratio": 1.2,  # max row-height ratio to consider same font size
     "merge_gap_ratio":        0.8,  # vertical gap must be < avg_height × this value
     "merge_min_h_overlap":    0.3,  # horizontal overlap must be ≥ this fraction of the narrower block
+    # Update tracking
+    "community_glossary_seen_version": 0,  # last community glossary index version seen by user
 }
 
 def load_config():

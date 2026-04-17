@@ -877,6 +877,7 @@ class ControlWindow(QMainWindow):
     # Heights used by _reposition()
     _H_BAR    = 50   # main bar (margins 8+8 + button 34)
     _H_RESULT = 38   # result row when visible (spacing 6 + pills 28 + bottom 4)
+    _H_BANNER = 36   # update banner when visible (spacing 6 + content 26 + top 4)
 
     def __init__(self, x: int, y: int, glossary=None, config=None, pipeline=None):
         super().__init__()
@@ -1029,10 +1030,55 @@ class ControlWindow(QMainWindow):
         self._result_row.setLayout(result_lay)
         self._result_row.hide()
 
+        # ── Update banner (hidden until an update is detected) ─────────────
+        self._banner_lbl = QLabel("")
+        self._banner_lbl.setStyleSheet(f"color: #EAB308; font-size: 12px;")
+        self._banner_action = QPushButton("")
+        self._banner_action.setFixedHeight(22)
+        self._banner_action.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(234,179,8,60);
+                color: #EAB308;
+                border: 1px solid rgba(234,179,8,120);
+                border-radius: 5px;
+                padding: 0 8px;
+                font-size: 12px;
+            }}
+            QPushButton:hover {{ background: rgba(234,179,8,100); }}
+        """)
+        banner_dismiss = QPushButton("✕")
+        banner_dismiss.setFixedSize(22, 22)
+        banner_dismiss.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                color: {self._MUTED};
+                border: none;
+                font-size: 12px;
+            }}
+            QPushButton:hover {{ color: {self._TEXT}; }}
+        """)
+        banner_dismiss.clicked.connect(self._dismiss_banner)
+
+        banner_lay = QHBoxLayout()
+        banner_lay.setContentsMargins(4, 2, 4, 2)
+        banner_lay.setSpacing(6)
+        banner_lay.addWidget(self._banner_lbl)
+        banner_lay.addStretch()
+        banner_lay.addWidget(self._banner_action)
+        banner_lay.addWidget(banner_dismiss)
+
+        self._update_banner = QWidget()
+        self._update_banner.setStyleSheet(
+            "QWidget { background: rgba(234,179,8,18); border-radius: 6px; }"
+        )
+        self._update_banner.setLayout(banner_lay)
+        self._update_banner.hide()
+
         # ── Container card ─────────────────────────────────────────────────
         vlay = QVBoxLayout()
         vlay.setContentsMargins(8, 8, 8, 8)
         vlay.setSpacing(6)
+        vlay.addWidget(self._update_banner)
         vlay.addLayout(bar)
         vlay.addWidget(self._result_row)
 
@@ -1162,8 +1208,59 @@ class ControlWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _reposition(self) -> None:
-        h = self._H_BAR + (self._H_RESULT if not self._result_row.isHidden() else 0)
+        h = self._H_BAR
+        if not self._result_row.isHidden():
+            h += self._H_RESULT
+        if not self._update_banner.isHidden():
+            h += self._H_BANNER
         self.setGeometry(self._roi_x, max(0, self._roi_y - h - 8), 440, h)
+
+    def show_glossary_update(self, remote_version: int) -> None:
+        self._banner_lbl.setText("✨ 社群詞彙表有更新")
+        self._banner_action.setText("立即更新")
+        try:
+            self._banner_action.clicked.disconnect()
+        except RuntimeError:
+            pass
+        self._banner_action.clicked.connect(
+            lambda: self._on_glossary_update_clicked(remote_version)
+        )
+        self._update_banner.show()
+        self._reposition()
+
+    def show_app_update(self, latest_version: str) -> None:
+        self._banner_lbl.setText(f"🚀 新版本 v{latest_version} 可下載")
+        self._banner_action.setText("前往下載")
+        try:
+            self._banner_action.clicked.disconnect()
+        except RuntimeError:
+            pass
+        self._banner_action.clicked.connect(self._on_app_update_clicked)
+        self._update_banner.show()
+        self._reposition()
+
+    def _on_glossary_update_clicked(self, remote_version: int) -> None:
+        from settings_ui import CommunityGlossaryDialog
+        dlg = CommunityGlossaryDialog(self)
+        if dlg.exec() == dlg.DialogCode.Accepted and dlg.selected_entries:
+            if self._glossary:
+                existing = self._glossary.get_all_entries()
+                self._glossary.set_all_entries(list(existing) + dlg.selected_entries)
+            if self._pipeline:
+                self._pipeline.clear_cache()
+        if self._config:
+            self._config["community_glossary_seen_version"] = remote_version
+            from config_manager import save_config
+            save_config(self._config)
+        self._dismiss_banner()
+
+    def _on_app_update_clicked(self) -> None:
+        import webbrowser
+        webbrowser.open(f"https://github.com/dodooodo/msw-translation/releases/latest")
+
+    def _dismiss_banner(self) -> None:
+        self._update_banner.hide()
+        self._reposition()
 
     # ------------------------------------------------------------------
     # Manual translation submit
@@ -1364,7 +1461,33 @@ class AppController:
         self._config   = load_config()
         self._glossary = GlossaryService()
         self._pipeline = TranslationPipeline(self._config, self._glossary)
+
+        # Pending update notifications (may arrive before ControlWindow exists)
+        self._pending_app_update: str | None = None
+        self._pending_glossary_version: int | None = None
+
+        self._start_update_check()
         self.show_selector()
+
+    def _start_update_check(self) -> None:
+        from update_checker import UpdateCheckerThread
+        seen = self._config.get("community_glossary_seen_version", 0)
+        self._update_thread = UpdateCheckerThread(seen)
+        self._update_thread.app_update_available.connect(self._on_app_update)
+        self._update_thread.glossary_update_available.connect(self._on_glossary_update)
+        self._update_thread.start()
+
+    def _on_app_update(self, latest: str) -> None:
+        if self.control:
+            self.control.show_app_update(latest)
+        else:
+            self._pending_app_update = latest
+
+    def _on_glossary_update(self, remote_version: int) -> None:
+        if self.control:
+            self.control.show_glossary_update(remote_version)
+        else:
+            self._pending_glossary_version = remote_version
 
     def show_selector(self) -> None:
         if self.overlay:
@@ -1394,6 +1517,14 @@ class AppController:
         self.control.pause_toggled.connect(self.overlay.set_paused)
         self.control.mode_changed.connect(self._on_mode_changed)
         self.control.show()
+
+        # Deliver any update notifications that arrived before ControlWindow existed
+        if self._pending_app_update:
+            self.control.show_app_update(self._pending_app_update)
+            self._pending_app_update = None
+        if self._pending_glossary_version is not None:
+            self.control.show_glossary_update(self._pending_glossary_version)
+            self._pending_glossary_version = None
 
     def _on_mode_changed(self, mode: str) -> None:
         self.overlay.set_edit_mode(mode == "edit")
