@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import threading
 import os
+import sys
 import subprocess
 from collections import OrderedDict
 
@@ -57,7 +58,15 @@ class LRUCache:
 # Apple Translation (macOS 26+)
 # ---------------------------------------------------------------------------
 
-_APPLE_BINARY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "translate_apple")
+def _bundle_dir() -> str:
+    """Return the directory containing platform helper binaries.
+    Inside a PyInstaller bundle this is sys._MEIPASS; otherwise the module dir."""
+    if getattr(sys, "frozen", False):
+        return sys._MEIPASS  # type: ignore[attr-defined]
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+_APPLE_BINARY_PATH = os.path.join(_bundle_dir(), "translate_apple")
 _APPLE_SWIFT_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "translate_apple.swift")
 
 _APPLE_LANG_MAP: dict[str, str] = {
@@ -112,6 +121,66 @@ def _translate_apple(texts: list[str], source_lang: str, target_lang: str) -> li
 
 
 # ---------------------------------------------------------------------------
+# Windows built-in translation (Windows 11 24H2+)
+# ---------------------------------------------------------------------------
+
+_WINDOWS_BINARY_PATH = os.path.join(_bundle_dir(), "translate_windows.exe")
+_WINDOWS_CS_PATH     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "translate_windows.cs")
+_WINDOWS_CSPROJ_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "translate_windows.csproj")
+
+_WINDOWS_LANG_MAP: dict[str, str] = {
+    "Korean":             "ko",
+    "Japanese":           "ja",
+    "English":            "en",
+    "Traditional Chinese":"zh-Hant",
+    "Simplified Chinese": "zh-Hans",
+}
+
+
+def _ensure_windows_binary() -> str | None:
+    if os.path.exists(_WINDOWS_BINARY_PATH):
+        return _WINDOWS_BINARY_PATH
+    if not os.path.exists(_WINDOWS_CSPROJ_PATH):
+        print("[Windows翻譯] 找不到 translate_windows.csproj")
+        return None
+    print("[Windows翻譯] 首次使用，正在編譯翻譯器…")
+    result = subprocess.run(
+        ["dotnet", "publish", _WINDOWS_CSPROJ_PATH,
+         "-r", "win-x64", "-o", os.path.dirname(_WINDOWS_BINARY_PATH)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"[Windows翻譯] 編譯失敗:\n{result.stderr}")
+        return None
+    print("[Windows翻譯] 編譯完成！")
+    return _WINDOWS_BINARY_PATH
+
+
+def _translate_windows(texts: list[str], source_lang: str, target_lang: str) -> list[str]:
+    source  = _WINDOWS_LANG_MAP.get(source_lang, "ko")
+    target  = _WINDOWS_LANG_MAP.get(target_lang, "zh-Hant")
+    binary  = _ensure_windows_binary()
+    if not binary:
+        return texts
+
+    payload = json.dumps({"texts": texts, "source": source, "target": target},
+                         ensure_ascii=False)
+    try:
+        result = subprocess.run([binary], input=payload, capture_output=True,
+                                text=True, timeout=30)
+        if result.returncode != 0:
+            print(f"[Windows翻譯] 錯誤: {result.stderr.strip()}")
+            return texts
+        return json.loads(result.stdout)
+    except subprocess.TimeoutExpired:
+        print("[Windows翻譯] 超時")
+        return texts
+    except Exception as e:
+        print(f"[Windows翻譯] 例外: {e}")
+        return texts
+
+
+# ---------------------------------------------------------------------------
 # Google Translate
 # ---------------------------------------------------------------------------
 
@@ -160,6 +229,8 @@ def engine_translate(texts: list[str], config: dict) -> list[str]:
 
     if engine == "apple":
         return _translate_apple(texts, source_lang, target_lang)
+    if engine == "windows":
+        return _translate_windows(texts, source_lang, target_lang)
     if engine == "google":
         return _translate_google(texts, source_lang, target_lang)
 

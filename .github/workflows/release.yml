@@ -1,0 +1,89 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            platform: macos-arm64
+            artifact_ext: zip
+          - os: windows-latest
+            platform: windows-x64
+            artifact_ext: zip
+          - os: ubuntu-latest
+            platform: linux-x64
+            artifact_ext: tar.gz
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Python + uv ──────────────────────────────────────────────────────
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Install Python dependencies
+        run: uv sync --all-extras
+
+      # ── Platform-specific build steps ────────────────────────────────────
+
+      - name: Compile translate_apple (macOS)
+        if: matrix.os == 'macos-latest'
+        run: swiftc translate_apple.swift -o translate_apple
+
+      - name: Install Tesseract (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-kor tesseract-ocr-jpn \
+            tesseract-ocr-chi-tra tesseract-ocr-chi-sim
+
+      - name: Set up .NET and build translate_windows.exe (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          dotnet publish translate_windows.csproj -r win-x64 -o .
+        shell: pwsh
+
+      # ── PyInstaller ───────────────────────────────────────────────────────
+      - name: Build binary with PyInstaller
+        run: uv run pyinstaller translator.spec
+
+      # ── Package artifact ─────────────────────────────────────────────────
+      - name: Package (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          TAG="${{ github.ref_name }}"
+          zip -r "MSW-Translator-${TAG}-${{ matrix.platform }}.zip" \
+              "dist/MSW Translator.app"
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          $TAG = "${{ github.ref_name }}"
+          Compress-Archive -Path "dist\MSW Translator.exe" `
+            -DestinationPath "MSW-Translator-${TAG}-${{ matrix.platform }}.zip"
+        shell: pwsh
+
+      - name: Package (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          TAG="${{ github.ref_name }}"
+          tar -czf "MSW-Translator-${TAG}-${{ matrix.platform }}.tar.gz" \
+              -C dist "MSW Translator"
+
+      # ── Upload to GitHub Release ──────────────────────────────────────────
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "MSW-Translator-*"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -18,6 +18,8 @@ def get_provider() -> OCRProvider:
     if sys.platform == "darwin":
         from ocr.mac import VisionOCRProvider
         return VisionOCRProvider()
-    else:
-        from ocr.tesseract import TesseractOCRProvider
-        return TesseractOCRProvider()
+    if sys.platform == "win32":
+        from ocr.windows import WindowsOCRProvider
+        return WindowsOCRProvider()
+    from ocr.tesseract import TesseractOCRProvider
+    return TesseractOCRProvider()

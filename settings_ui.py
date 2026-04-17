@@ -2,9 +2,10 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QSpinBox,
     QDoubleSpinBox, QPushButton, QColorDialog, QFormLayout, QTabWidget,
     QWidget, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QApplication,
+    QApplication, QFileDialog, QMessageBox, QListWidget, QListWidgetItem,
+    QInputDialog,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QKeySequence
 from config_manager import load_config, save_config
 
@@ -127,9 +128,9 @@ class SettingsDialog(QDialog):
         # Engine
         self.engine_combo = QComboBox()
         self.engine_combo.addItems([
-            "Dummy (測試用不翻譯)", "Apple 翻譯 (系統內建)", "Google Translate"
+            "Dummy (測試用不翻譯)", "Apple 翻譯 (macOS 內建)", "Windows 翻譯 (系統內建)", "Google Translate"
         ])
-        engine_map = {"dummy": 0, "apple": 1, "google": 2}
+        engine_map = {"dummy": 0, "apple": 1, "windows": 2, "google": 3}
         self.engine_combo.setCurrentIndex(
             engine_map.get(self.config.get("translator_engine", "dummy"), 0)
         )
@@ -161,6 +162,22 @@ class SettingsDialog(QDialog):
     def _build_glossary_tab(self) -> QWidget:
         tab = QWidget()
         vlay = QVBoxLayout()
+
+        # Community / import / export toolbar
+        comm_btn   = QPushButton("☁ Community")
+        url_btn    = QPushButton("🔗 URL 匯入")
+        export_btn = QPushButton("↓ 匯出")
+        for btn in (comm_btn, url_btn, export_btn):
+            btn.setStyleSheet("padding: 4px 10px;")
+        comm_btn.clicked.connect(self._open_community_dialog)
+        url_btn.clicked.connect(self._import_from_url)
+        export_btn.clicked.connect(self._export_glossary)
+        share_row = QHBoxLayout()
+        share_row.addWidget(comm_btn)
+        share_row.addWidget(url_btn)
+        share_row.addWidget(export_btn)
+        share_row.addStretch()
+        vlay.addLayout(share_row)
 
         # Language pair label
         _display = {
@@ -270,11 +287,80 @@ class SettingsDialog(QDialog):
             self._update_color_btn()
 
     # ------------------------------------------------------------------
+    # Community / import / export
+    # ------------------------------------------------------------------
+
+    def _open_community_dialog(self) -> None:
+        dlg = CommunityGlossaryDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.selected_entries:
+            self._merge_or_replace_entries(dlg.selected_entries)
+
+    def _import_from_url(self) -> None:
+        url, ok = QInputDialog.getText(
+            self, "🔗 URL 匯入", "貼上詞彙表 JSON 的原始網址 (raw URL)："
+        )
+        if not ok or not url.strip():
+            return
+        from community_glossary import fetch_glossary_from_url
+        try:
+            entries = fetch_glossary_from_url(url.strip())
+        except Exception as e:
+            QMessageBox.warning(self, "匯入失敗", str(e))
+            return
+        if not entries:
+            QMessageBox.information(self, "匯入完成", "未找到任何詞彙條目。")
+            return
+        self._merge_or_replace_entries(entries)
+
+    def _export_glossary(self) -> None:
+        import json
+        from glossary_service import GlossaryEntry
+        from dataclasses import asdict
+
+        # Collect current table entries
+        entries = []
+        for row in range(self._gloss_table.rowCount()):
+            def _cell(col: int) -> str:
+                item = self._gloss_table.item(row, col)
+                return item.text().strip() if item else ""
+            terms = {lang: _cell(i) for i, lang in enumerate(self._glossary_langs) if _cell(i)}
+            notes = _cell(len(self._glossary_langs))
+            if terms:
+                entries.append(GlossaryEntry(terms=terms, notes=notes))
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "匯出詞彙表", "glossary.json", "JSON (*.json)"
+        )
+        if not path:
+            return
+        data = {"version": 1, "entries": [asdict(e) for e in entries]}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        QMessageBox.information(self, "匯出完成", f"已儲存 {len(entries)} 條詞彙至\n{path}")
+
+    def _merge_or_replace_entries(self, new_entries: list) -> None:
+        reply = QMessageBox.question(
+            self, "匯入詞彙",
+            f"匯入了 {len(new_entries)} 條詞彙。\n\n"
+            "「取代」— 清除目前所有詞彙後匯入\n"
+            "「合併」— 追加到現有詞彙後方",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+        )
+        if reply == QMessageBox.StandardButton.Cancel:
+            return
+        if reply == QMessageBox.StandardButton.Yes:  # Replace
+            while self._gloss_table.rowCount():
+                self._gloss_table.removeRow(0)
+        for entry in new_entries:
+            self._append_table_row(entry)
+        self._glossary_modified = True
+
+    # ------------------------------------------------------------------
     # Save
     # ------------------------------------------------------------------
 
     def _save_and_close(self) -> None:
-        engine_rev_map = {0: "dummy", 1: "apple", 2: "google"}
+        engine_rev_map = {0: "dummy", 1: "apple", 2: "windows", 3: "google"}
         new_config = {
             "source_language": self.source_langs[self.source_combo.currentIndex()],
             "target_language": self.target_langs[self.target_combo.currentIndex()],
@@ -318,3 +404,117 @@ class SettingsDialog(QDialog):
             self._pipeline.clear_cache()
 
         self.accept()
+
+
+# ---------------------------------------------------------------------------
+# Community glossary browser
+# ---------------------------------------------------------------------------
+
+class _FetchIndexWorker(QThread):
+    finished = pyqtSignal(list)   # list[GlossaryMeta]
+    error    = pyqtSignal(str)
+
+    def run(self):
+        try:
+            from community_glossary import fetch_index
+            self.finished.emit(fetch_index())
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class _FetchGlossaryWorker(QThread):
+    finished = pyqtSignal(list)   # list[GlossaryEntry]
+    error    = pyqtSignal(str)
+
+    def __init__(self, url: str):
+        super().__init__()
+        self._url = url
+
+    def run(self):
+        try:
+            from community_glossary import fetch_glossary
+            self.finished.emit(fetch_glossary(self._url))
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class CommunityGlossaryDialog(QDialog):
+    """Browse and import community-shared glossaries from the msw-glossary repo."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.selected_entries: list = []
+        self._meta: list = []
+
+        self.setWindowTitle("☁ Community Glossaries")
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        self.resize(480, 360)
+
+        self._status_lbl = QLabel("正在載入清單…")
+        self._status_lbl.setStyleSheet("color: #888; font-size: 11px;")
+
+        self._list = QListWidget()
+        self._list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+
+        self._import_btn = QPushButton("↓ 匯入選取")
+        self._import_btn.setEnabled(False)
+        self._import_btn.clicked.connect(self._on_import)
+
+        cancel_btn = QPushButton("關閉")
+        cancel_btn.clicked.connect(self.reject)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(self._import_btn)
+        btn_row.addWidget(cancel_btn)
+
+        vlay = QVBoxLayout()
+        vlay.addWidget(self._status_lbl)
+        vlay.addWidget(self._list)
+        vlay.addLayout(btn_row)
+        self.setLayout(vlay)
+
+        self._fetch_worker = _FetchIndexWorker()
+        self._fetch_worker.finished.connect(self._on_index_loaded)
+        self._fetch_worker.error.connect(self._on_index_error)
+        self._fetch_worker.start()
+
+    def _on_index_loaded(self, metas: list) -> None:
+        self._meta = metas
+        self._list.clear()
+        if not metas:
+            self._status_lbl.setText("目前沒有社群詞彙表。")
+            return
+        self._status_lbl.setText(f"找到 {len(metas)} 個詞彙表，點選後按匯入。")
+        for m in metas:
+            label = f"{m.name}  ({m.entry_count} 條)"
+            item = QListWidgetItem(label)
+            self._list.addItem(item)
+        self._import_btn.setEnabled(True)
+
+    def _on_index_error(self, msg: str) -> None:
+        self._status_lbl.setText(f"載入失敗：{msg}")
+        self._status_lbl.setStyleSheet("color: #e55; font-size: 11px;")
+
+    def _on_import(self) -> None:
+        row = self._list.currentRow()
+        if row < 0 or row >= len(self._meta):
+            return
+        meta = self._meta[row]
+        self._import_btn.setEnabled(False)
+        self._status_lbl.setText(f"正在下載「{meta.name}」…")
+
+        self._gloss_worker = _FetchGlossaryWorker(meta.raw_url)
+        self._gloss_worker.finished.connect(self._on_glossary_loaded)
+        self._gloss_worker.error.connect(self._on_glossary_error)
+        self._gloss_worker.start()
+
+    def _on_glossary_loaded(self, entries: list) -> None:
+        self.selected_entries = entries
+        self._status_lbl.setText(f"下載完成，共 {len(entries)} 條。")
+        self.accept()
+
+    def _on_glossary_error(self, msg: str) -> None:
+        self._status_lbl.setText(f"下載失敗：{msg}")
+        self._status_lbl.setStyleSheet("color: #e55; font-size: 11px;")
+        self._import_btn.setEnabled(True)
