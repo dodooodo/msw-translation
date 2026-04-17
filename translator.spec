@@ -68,7 +68,7 @@ if sys.platform == "darwin":
         exe,
         name="MSW Translator.app",
         icon=None,
-        bundle_identifier="com.dodoodo.msw-translation",
+        bundle_identifier="com.dodooodo.msw-translation",
         info_plist={
             "NSHighResolutionCapable": True,
             "LSUIElement": True,  # no Dock icon (overlay app)

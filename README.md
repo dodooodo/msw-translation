@@ -1,7 +1,7 @@
 # msw_translation
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-blue)](https://github.com/dodoodo/msw-translation/releases)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-blue)](https://github.com/dodooodo/msw-translation/releases)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 
 Real-time game overlay translator. Captures a region of your screen, recognises
@@ -15,7 +15,7 @@ Built for MapleStory Worlds and similar games with Korean/Japanese/Chinese UI.
 ## Download
 
 Grab the latest release for your platform from the
-[**Releases page**](https://github.com/dodoodo/msw-translation/releases):
+[**Releases page**](https://github.com/dodooodo/msw-translation/releases):
 
 | Platform | File | Requirements |
 |----------|------|--------------|
@@ -32,7 +32,7 @@ Unzip and run the app — no Python installation needed.
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-git clone https://github.com/dodoodo/msw-translation.git
+git clone https://github.com/dodooodo/msw-translation.git
 cd msw-translation
 
 uv run translator.py
@@ -93,13 +93,13 @@ tables directly from Excel.
 
 The **☁ Community Glossaries** button in the 詞彙表 tab lets you browse and
 import game-specific glossaries shared by the community. The curated list is
-maintained at [dodoodo/msw-glossary](https://github.com/dodoodo/msw-glossary).
+maintained at [dodooodo/msw-glossary](https://github.com/dodooodo/msw-glossary).
 
 To share your own glossary:
 - **Quick share** — use **↓ Export** to save your `glossary.json`, then paste the
   raw URL (GitHub Gist, etc.) into **🔗 Import from URL** on another machine.
 - **Contribute to the official list** — submit a PR to
-  [msw-glossary](https://github.com/dodoodo/msw-glossary) or open an issue
+  [msw-glossary](https://github.com/dodooodo/msw-glossary) or open an issue
   with your exported JSON.
 
 ### Manual format (`glossary.json`)
@@ -230,8 +230,8 @@ translate_windows.cs    Windows Translation framework CLI helper
 ## Contributing
 
 Issues and PRs welcome. For glossary contributions, see
-[dodoodo/msw-glossary](https://github.com/dodoodo/msw-glossary).
+[dodooodo/msw-glossary](https://github.com/dodooodo/msw-glossary).
 
 ## License
 
-[MIT](LICENSE) © 2026 dodoodo
+[MIT](LICENSE) © 2026 dodooodo

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from glossary_service import GlossaryEntry
 
 COMMUNITY_INDEX_URL = (
-    "https://raw.githubusercontent.com/dodoodo/msw-glossary/main/index.json"
+    "https://raw.githubusercontent.com/dodooodo/msw-glossary/main/index.json"
 )
 
 _TIMEOUT = 8  # seconds
