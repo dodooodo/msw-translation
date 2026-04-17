@@ -134,3 +134,44 @@ The glossary tab is implemented in `settings_ui.py` (`SettingsDialog`, "📖 詞
   - Calls `pipeline.clear_cache()` clearing invalidated texts currently on-screen.
 
 The unified table allows editing all language variants of a term simultaneously without needing to manually toggle source and target language fields first.
+
+## Community glossary sharing
+
+Three sharing mechanisms are exposed in the 詞彙表 toolbar:
+
+### ☁ Community Glossaries
+
+Fetches `index.json` from [dodooodo/msw-glossary](https://github.com/dodooodo/msw-glossary)
+in a background `QThread` and shows a list of available glossaries. Selecting one fetches
+the raw JSON and offers a **Replace** / **Merge** choice before importing.
+
+### 🔗 URL 匯入
+
+Prompts for any raw JSON URL (GitHub Gist, raw GitHub file, etc.) and imports it the same
+way as community glossaries. Users share URLs on Discord, Reddit, or other channels.
+
+### ↓ 匯出
+
+Saves the current table to a `glossary.json`-format file on disk. The exported file is
+directly importable by any instance of the app via URL 匯入 or as a PR to the community repo.
+
+## Community repo format (`index.json`)
+
+```json
+{
+  "version": 1,
+  "glossaries": [
+    {
+      "name": "MapleStory Worlds — General",
+      "game": "MapleStory Worlds",
+      "languages": ["Korean", "Japanese", "English", "Traditional Chinese", "Simplified Chinese"],
+      "entry_count": 6,
+      "author": "dodooodo",
+      "raw_url": "https://raw.githubusercontent.com/dodooodo/msw-glossary/main/glossaries/maplestory-worlds/kr-zh-hant.json"
+    }
+  ]
+}
+```
+
+`languages` lists all languages the file declares support for. Individual entries may
+omit language keys that are not yet filled in — the app uses whatever is present in `terms`.

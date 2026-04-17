@@ -64,6 +64,18 @@ The image format is opaque to callers other than the matching OCR provider.
 | `MacCaptureProvider` | `CGImageRef` | macOS |
 | `MssCaptureProvider` | `mss.ScreenShot` | Windows / Linux |
 
+### OCR providers
+
+| Provider | Input | Platform |
+|----------|-------|----------|
+| `VisionOCRProvider` | `CGImageRef` | macOS (Apple Vision) |
+| `WindowsOCRProvider` | `mss.ScreenShot` | Windows 10/11 (Windows.Media.Ocr via `winrt`) |
+| `TesseractOCRProvider` | `mss.ScreenShot` | Linux (pytesseract fallback) |
+
+`WindowsOCRProvider.recognize()` runs an `asyncio.run()` internally to drive the WinRT
+async OCR API synchronously from the worker thread. The mss screenshot is converted to
+a `SoftwareBitmap` (Bgra8) via PIL + `InMemoryRandomAccessStream` + `BitmapDecoder`.
+
 `below_win_id` (macOS only): when the overlay's NSWindow number is passed,
 `CGWindowListCreateImage` captures only windows beneath the overlay — so the
 translated text is never captured and re-translated.
@@ -119,9 +131,15 @@ concurrent access from the OCR worker loop and translation consumer thread.
 |--------|---------------|---------|
 | `dummy` | Return originals | All |
 | `apple` | `translate_apple` Swift subprocess | macOS 26+ |
+| `windows` | `translate_windows.exe` C# subprocess | Windows 11 24H2+ |
 | `google` | `googletrans` library | All |
 
 `engine_translate(texts, config) -> list[str]` is the sole public function.
+
+Both subprocess helpers (`translate_apple`, `translate_windows.exe`) are located via
+`_bundle_dir()`, which returns `sys._MEIPASS` when running inside a PyInstaller bundle
+and the project root otherwise. This makes the same code work for both `uv run` and
+packaged `.app` / `.exe` without any path changes at call sites.
 
 ### Glossary service (`glossary_service.py`)
 
@@ -140,6 +158,24 @@ Manages user-defined term overrides. Data model treats entries as an i18n term d
   garbled or lost.
 
 Storage: `glossary.json` (JSON, human-readable, hand-editable).
+
+### Community glossary (`community_glossary.py`)
+
+Pure stdlib module (no third-party deps) for fetching community-shared glossaries
+from the [dodooodo/msw-glossary](https://github.com/dodooodo/msw-glossary) GitHub repo.
+
+```
+fetch_index()  →  list[GlossaryMeta]
+    Downloads index.json from COMMUNITY_INDEX_URL
+    Each GlossaryMeta: name, game, languages (all 5), entry_count, raw_url
+
+fetch_glossary(raw_url)  →  list[GlossaryEntry]
+    Downloads a glossary file and deserializes entries
+    Accepts any raw URL — GitHub, Gist, etc.
+```
+
+Always called from a `QThread` (`_FetchIndexWorker` / `_FetchGlossaryWorker` in
+`settings_ui.py`) — never from the Qt main thread. 8-second timeout on all requests.
 
 ### Translation pipeline (`translation_pipeline.py`)
 

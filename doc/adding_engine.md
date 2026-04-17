@@ -36,22 +36,23 @@ def engine_translate(texts: list[str], config: dict) -> list[str]:
 
 ### 3. Expose it in the settings UI
 
-In `settings_ui.py`, add to the `engine_combo` item list and `engine_rev_map`:
+In `settings_ui.py`, add to the `engine_combo` item list and both maps:
 
 ```python
 self.engine_combo.addItems([
     "Dummy (測試用不翻譯)",
-    "Apple 翻譯 (系統內建)",
+    "Apple 翻譯 (macOS 內建)",
+    "Windows 翻譯 (系統內建)",
     "Google Translate",
     "My Engine",          # ← add here
 ])
-engine_map = {"dummy": 0, "apple": 1, "google": 2, "myengine": 3}
+engine_map = {"dummy": 0, "apple": 1, "windows": 2, "google": 3, "myengine": 4}
 ```
 
-And in `save_and_close`:
+And in `_save_and_close`:
 
 ```python
-engine_rev_map = {0: "dummy", 1: "apple", 2: "google", 3: "myengine"}
+engine_rev_map = {0: "dummy", 1: "apple", 2: "windows", 3: "google", 4: "myengine"}
 ```
 
 ## Rules
