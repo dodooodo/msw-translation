@@ -487,7 +487,8 @@ class CommunityGlossaryDialog(QDialog):
             return
         self._status_lbl.setText(f"找到 {len(metas)} 個詞彙表，點選後按匯入。")
         for m in metas:
-            label = f"{m.name}  ({m.entry_count} 條)"
+            langs = " / ".join(m.languages) if m.languages else ""
+            label = f"{m.name}  [{langs}]  {m.entry_count} 條"
             item = QListWidgetItem(label)
             self._list.addItem(item)
         self._import_btn.setEnabled(True)

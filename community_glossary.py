@@ -23,8 +23,7 @@ _TIMEOUT = 8  # seconds
 class GlossaryMeta:
     name: str
     game: str
-    source_language: str
-    target_language: str
+    languages: list[str]   # all languages covered, e.g. ["Korean", "Traditional Chinese"]
     entry_count: int
     raw_url: str
 
@@ -38,8 +37,7 @@ def fetch_index() -> list[GlossaryMeta]:
         GlossaryMeta(
             name=g.get("name", ""),
             game=g.get("game", ""),
-            source_language=g.get("source_language", ""),
-            target_language=g.get("target_language", ""),
+            languages=g.get("languages", []),
             entry_count=g.get("entry_count", 0),
             raw_url=g.get("raw_url", ""),
         )
