@@ -46,6 +46,8 @@ ocr/                    Platform OCR abstraction
 
 config_manager.py       load_config() / save_config() — reads/writes config.json
 settings_ui.py          PyQt6 settings dialog — QTabWidget: "⚙️ 一般" + "📖 詞彙表" tabs
+version.py              APP_VERSION + GITHUB_REPO constants (single source of truth)
+update_checker.py       UpdateCheckerThread — checks GitHub releases + glossary index on startup
 translate_apple.swift   macOS 26+ Translation framework Swift CLI (stdin→stdout JSON)
 translate_apple         Compiled Swift binary (auto-built on first Apple engine use)
 translate_windows.cs    Windows 11 24H2+ Translation framework C# CLI (stdin→stdout JSON)
@@ -67,6 +69,7 @@ doc/                    Developer documentation
   adding_engine.md        How to add a new translation engine
   adding_platform.md      Platform support matrix and porting guide
   glossary.md             How the glossary pipeline works
+  distribution.md         Release process, PyInstaller spec, CI workflow, version bumping
 ```
 
 ## Key design rules
@@ -131,6 +134,7 @@ doc/                    Developer documentation
 | `merge_max_height_ratio` | `1.2` | Max row-height ratio to consider two blocks the same font size (`block_merger`) |
 | `merge_gap_ratio` | `0.8` | Vertical gap must be < avg\_height × this value to merge (`block_merger`) |
 | `merge_min_h_overlap` | `0.3` | Horizontal overlap must be ≥ this fraction of the narrower block's width (`block_merger`) |
+| `community_glossary_seen_version` | `0` | Last community glossary `index.json` version the user has seen; compared against remote on startup |
 
 ## Running tests
 
@@ -201,6 +205,32 @@ Each entry in `index.json` declares `name`, `game`, `languages` (all 5 supported
 Glossary files use the same format as local `glossary.json` (version 1, entries array
 with `terms: {language: value}` dicts). Entries can have any subset of the 5 languages;
 missing language keys are simply absent from `terms`.
+
+## Update notifications
+
+`AppController.__init__` starts `UpdateCheckerThread` (a `QThread`) immediately on launch.
+The thread makes two network requests (6-second timeout each, stdlib `urllib`):
+
+1. **App update** — `GET https://api.github.com/repos/dodooodo/msw-translation/releases/latest`
+   Compares `tag_name` against `APP_VERSION` from `version.py`. If newer, emits `app_update_available(latest_str)`.
+
+2. **Glossary update** — `GET` community `index.json`. Compares `version` field against
+   `config["community_glossary_seen_version"]`. If newer, emits `glossary_update_available(remote_int)`.
+
+If the check completes before `ControlWindow` exists (user still on the ROI selector),
+results are stored as `_pending_app_update` / `_pending_glossary_version` on `AppController`
+and delivered immediately when `launch_overlay()` creates `ControlWindow`.
+
+`ControlWindow` renders an amber banner (`_update_banner`, hidden by default) above the
+main control bar. Banner height (`_H_BANNER = 36`) is included in `_reposition()`:
+- **Glossary update** — "✨ 社群詞彙表有更新" + `[立即更新]` opens `CommunityGlossaryDialog`
+  and saves the new `community_glossary_seen_version` to `config.json` after import.
+- **App update** — "🚀 新版本 vX.Y.Z 可下載" + `[前往下載]` opens browser to GitHub releases.
+- `[✕]` dismisses without recording the version (banner reappears next launch).
+
+To trigger an update notification for all users:
+- **Glossary:** bump `"version"` in `msw-glossary/index.json` and push.
+- **App:** push a new `v*` tag (CI builds the release; GitHub API returns the new tag).
 
 ## User input panel (`ControlWindow`)
 

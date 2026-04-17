@@ -159,6 +159,24 @@ Manages user-defined term overrides. Data model treats entries as an i18n term d
 
 Storage: `glossary.json` (JSON, human-readable, hand-editable).
 
+### Version and update checker (`version.py`, `update_checker.py`)
+
+`version.py` is the single source of truth for the app version and GitHub repo slug.
+All version comparisons and release URLs derive from constants defined here.
+
+`UpdateCheckerThread(QThread)` runs once on app startup. It makes two sequential
+network requests (6 s timeout each, stdlib `urllib.request`):
+
+1. `GET https://api.github.com/repos/{GITHUB_REPO}/releases/latest` — parses `tag_name`,
+   compares tuple `(major, minor, patch)` against `APP_VERSION`, emits
+   `app_update_available(str)` if newer.
+2. `GET {COMMUNITY_INDEX_URL}` — reads top-level `"version"` integer, compares against
+   `config["community_glossary_seen_version"]`, emits `glossary_update_available(int)` if newer.
+
+Signals are connected to `ControlWindow.show_app_update()` / `show_glossary_update()`.
+If the thread completes before `ControlWindow` is created, `AppController` buffers results
+in `_pending_*` fields and delivers them in `launch_overlay()`.
+
 ### Community glossary (`community_glossary.py`)
 
 Pure stdlib module (no third-party deps) for fetching community-shared glossaries
@@ -228,8 +246,8 @@ hints, biasing the OCR engine toward known game vocabulary and reducing variance
 | `SnippingToolWindow` | Full-screen ROI selector; drag to draw, click confirm; opens `SettingsDialog` |
 | `TranslatorOverlay` | QPainter-based rendering; no QLabel (avoids macOS widget shadows); normal mode = pass-through; edit mode = clickable with bbox outlines |
 | `EditPopup` | Floats over `TranslatorOverlay` in edit mode; pre-fills with OCR source + current translation; saves to glossary on confirm |
-| `ControlWindow` | Dark glass bar: pause, text input, translate, ⊕ edit-mode toggle, stop; result pills; autocomplete popup |
-| `AppController` | Creates shared `config`, `GlossaryService`, `TranslationPipeline`; wires `mode_changed` → `overlay.set_edit_mode()` |
+| `ControlWindow` | Dark glass bar: pause, text input, translate, ⊕ edit-mode toggle, stop; result pills; autocomplete popup; amber update banner (hidden until update detected) |
+| `AppController` | Creates shared `config`, `GlossaryService`, `TranslationPipeline`; starts `UpdateCheckerThread`; wires `mode_changed` → `overlay.set_edit_mode()`; buffers pending update signals until `ControlWindow` exists |
 
 **Rendering notes:**
 - `fillRect(bbox_width)` for background — never extends beyond the bbox

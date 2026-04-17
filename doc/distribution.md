@@ -84,6 +84,41 @@ All subprocess helpers (`translate_apple`, `translate_windows.exe`) are located
 relative to `_bundle_dir()`, so the same path logic works in both `uv run` and
 packaged contexts.
 
+## Releasing a new version (step by step)
+
+1. **Bump `APP_VERSION`** in `version.py`:
+   ```python
+   APP_VERSION = "0.2.0"
+   ```
+2. Update `CLAUDE.md` / `README.md` if anything significant changed.
+3. Commit and push to `main`.
+4. Tag and push:
+   ```bash
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+5. GitHub Actions builds all three platforms automatically.
+   Monitor at `https://github.com/dodooodo/msw-translation/actions`.
+6. Users with the app installed will see the amber update banner on their next launch
+   (the update checker compares against the latest GitHub release tag).
+
+## Updating the community glossary
+
+The in-app update notification for glossaries is driven by the top-level `"version"`
+integer in [`msw-glossary/index.json`](https://github.com/dodooodo/msw-glossary).
+
+1. Add or edit glossary files in `msw-glossary/glossaries/`.
+2. Update `"entry_count"` for any changed entries in `index.json`.
+3. Increment `"version"`:
+   ```json
+   { "version": 2, "glossaries": [ … ] }
+   ```
+4. Commit and push to `msw-glossary/main`.
+
+Users whose local `community_glossary_seen_version` is less than the new `version` will
+see "✨ 社群詞彙表有更新" on their next launch. Clicking **[立即更新]** opens the
+community browser and saves the new seen version after import.
+
 ## Auto-compile on first use
 
 When running from source (`uv run main.py`), the platform helper binary is compiled
