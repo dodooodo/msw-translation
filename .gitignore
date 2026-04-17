@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.python-version
+venv/
+.venv/
+
+# uv
+.uv/
+
+# User data — not committed (each user has their own)
+config.json
+glossary.json
+
+# Compiled platform helpers (auto-built on first run)
+translate_apple
+translate_windows.exe
+
+# PyInstaller
+build/
+dist/
+*.egg-info/
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# Windows
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Personal / scratch
+scratch/
+Xml Chinese/
+___dont_read_me.md
+GEMINI.md

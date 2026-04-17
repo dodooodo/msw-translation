@@ -1,0 +1,326 @@
+# Architecture
+
+## Overview
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                     Qt Main Thread                       │
+│                                                          │
+│  SnippingToolWindow  ──roi──►  AppController             │
+│                                    │                     │
+│                         ┌──────────┼──────────┐          │
+│                         ▼          ▼           ▼         │
+│              TranslatorOverlay  ControlWindow  ...        │
+│                    ▲                                      │
+│           result_ready signal                            │
+└───────────────────────────────────────────────────────── ┘
+                         ▲
+                         │  QThread (OCRWorker)
+┌────────────────────────┴────────────────────────────────┐
+│  capture.grab()  →  ocr.recognize()  →  annotate_colors │
+│       │                                                  │
+│       └──► merge_blocks_by_proximity()                   │
+│                    │                                     │
+│       ┌────────────┴───────────────┐                     │
+│       │ pipeline.get_cached()      │                     │
+│       │  hit → emit #1 immediately │                     │
+│       │  miss → enqueue job ───────┼──► _translation_    │
+│       │   (replaces stale pending) │    consumer thread  │
+│       │                            │     (single, persistent)
+│       │                            │          │           │
+│       │                            │    emit #2 when done │
+│       └────────────────────────────┘                     │
+└─────────────────────────────────────────────────────────┘
+```
+
+## Module responsibilities
+
+### Data model (`ocr_model.py`)
+
+`OCRBlock` is the only data type that flows through the entire pipeline.
+No module invents its own dict schema — everything is an `OCRBlock` attribute.
+
+```
+text        Raw OCR string (source language)
+bbox        (x, y, w, h) logical pixels within the ROI
+conf        OCR confidence [0.0, 1.0]
+text_color  Sampled from screenshot (#hex) — filled by color_sampler
+bg_color    Sampled from screenshot (#hex) — filled by color_sampler
+translated  Final display string — filled by TranslationPipeline
+sub_bboxes  Original per-line bboxes when block_merger joined multiple rows
+sub_texts   Original per-line OCR strings
+sub_colors  Per-line (text_color, bg_color) pairs
+```
+
+`is_merged` is a property (`len(sub_bboxes) > 1`), not a stored field.
+
+### Capture layer (`capture/`)
+
+Responsibility: return a platform image object for a given ROI.
+The image format is opaque to callers other than the matching OCR provider.
+
+| Provider | Image type | Platform |
+|----------|-----------|----------|
+| `MacCaptureProvider` | `CGImageRef` | macOS |
+| `MssCaptureProvider` | `mss.ScreenShot` | Windows / Linux |
+
+`below_win_id` (macOS only): when the overlay's NSWindow number is passed,
+`CGWindowListCreateImage` captures only windows beneath the overlay — so the
+translated text is never captured and re-translated.
+
+### OCR layer (`ocr/`)
+
+Responsibility: convert a platform image into a list of `OCRBlock`.
+Fills `text`, `bbox`, `conf`. Does not fill `text_color` / `bg_color`.
+
+`OCR_LANG_MAP` lives here as the single authoritative mapping from config
+language names (`"Korean"`) to engine-specific codes (`["ko-KR"]`).
+
+### Color sampler (`color_sampler.py`)
+
+Responsibility: fill `text_color` and `bg_color` on each block by sampling
+raw pixels from the CGImage. macOS-only; `annotate_colors()` is a silent
+no-op on other platforms.
+
+**Algorithm:**
+1. Sub-sample bbox interior with step = max(3, min(w,h)//8)
+2. Background = 5-bit quantized mode of samples → averaged with neighbors ±20
+3. Text color = pixels with distance > 40 from background, top-third by distance, averaged
+
+Uses `CGDataProviderCopyData` + raw byte indexing (~1000× faster than `NSBitmapImageRep.colorAtX_y_()`).
+
+**Retina scale:** CGImage is physical pixels (2× on Retina); bbox coords are
+logical. Scale factor `sx = img_w / logical_w` converts before sampling.
+
+**BGRA detection:** `CGImageGetBitmapInfo & 0x2000` detects Apple Silicon byte order.
+
+### Block merger (`block_merger.py`)
+
+Merges vertically adjacent OCR lines into single-sentence blocks.
+Three conditions must all hold:
+
+1. **Font size similar** — row-height ratio < 1.2
+2. **Vertical gap small** — gap < average row height × 0.8
+3. **Horizontal overlap** — ≥ 30% of the narrower block's width
+   (prevents left/right separate UI panels from being joined)
+
+Merged blocks carry `sub_bboxes / sub_texts / sub_colors` so the renderer
+can position each translated line at its original row's pixel location.
+
+### Translation engine (`translator_engine.py`)
+
+Responsibility: raw API calls only. No cache, no glossary, no pipeline logic.
+
+`LRUCache` is thread-safe: all `get()`, `put()`, `clear()`, `__len__()` operations
+are guarded by a `threading.Lock` to prevent `OrderedDict` corruption under
+concurrent access from the OCR worker loop and translation consumer thread.
+
+| Engine | Implementation | Platform |
+|--------|---------------|---------|
+| `dummy` | Return originals | All |
+| `apple` | `translate_apple` Swift subprocess | macOS 26+ |
+| `google` | `googletrans` library | All |
+
+`engine_translate(texts, config) -> list[str]` is the sole public function.
+
+### Glossary service (`glossary_service.py`)
+
+Manages user-defined term overrides. Data model treats entries as an i18n term dict mapping multiple languages simultaneously internally. 
+
+**Two pipeline roles:**
+
+- `protect(text, src, tgt)` — replaces source terms with `__T0__`, `__T1__` …
+  before translation so the engine cannot mangle proper nouns.
+  Returns `(protected_text, {placeholder: target_term})`.
+
+- `restore(text, placeholder_map)` — replaces placeholders with target terms
+  after translation.
+
+- `correct(text, src, tgt)` — fallback pass for any placeholders the engine
+  garbled or lost.
+
+Storage: `glossary.json` (JSON, human-readable, hand-editable).
+
+### Translation pipeline (`translation_pipeline.py`)
+
+Orchestrates the full lifecycle: pre-process → engine → post-process + cache.
+Injected into `OCRWorker` and any future user-input widget from `AppController`.
+
+**Cache strategy (performance-critical):**
+- Key = `_normalize(raw_text)` — NFC composition + whitespace collapse + stray-char strip
+- Value = fully post-processed final result
+- Cache hit: `O(1)` dict lookup, zero glossary overhead
+- Cache miss: full pipeline runs once; result stored; never repeated for that text
+- Call `clear_cache()` after glossary changes
+
+`translate_missing(texts)` — warms cache; intended for background threads.
+`translate(texts) -> list[str]` — synchronous; for user-typed input or tests.
+
+### OCRWorker (`translator.py`)
+
+Thin QThread that orchestrates the pure modules.
+
+**State tracking (`_tracked: list[_TrackedBlock]`):**
+Each `_TrackedBlock` stores the last confirmed `OCRBlock`, its translation, and a
+TTL countdown. Shared between the main loop and the consumer thread under `_tracked_lock`.
+
+**Per-tick classification (priority order):**
+1. `capture.grab()` + `ocr.recognize(custom_words=…)` + `annotate_colors()` + `merge_blocks()`
+2. For each block: `pipeline.get_cached(text)` — O(1) cache hit → emit immediately
+3. **Mechanism 3 — Spatio-temporal match:** IoU > 0.8 AND edit-distance < 2 against
+   `_tracked` → reuse existing translation, skip re-translation
+4. No match → enqueue for consumer thread (drop-old strategy)
+
+**Mechanism 4 — TTL ghost rendering:**
+After matching, `_tracked` is rebuilt: fresh hits get full `linger_frames` TTL; unmatched
+tracked blocks are decremented and kept until TTL reaches 0. Render = all entries still
+alive in `_tracked`, including ghosts. This prevents flicker from brief OCR misses.
+
+**Drop-old strategy:**
+If a new OCR tick arrives while the consumer is still translating, the pending job slot is
+**replaced** with the latest unmatched blocks — at most one `translate_apple` subprocess
+runs at a time. The Qt event loop (and overlay repaint) is never blocked.
+
+**`customWords`:**
+Glossary source-language terms are passed to `ocr.recognize()` each tick as custom word
+hints, biasing the OCR engine toward known game vocabulary and reducing variance.
+
+### Qt UI (`translator.py`)
+
+| Class | Role |
+|-------|------|
+| `SnippingToolWindow` | Full-screen ROI selector; drag to draw, click confirm; opens `SettingsDialog` |
+| `TranslatorOverlay` | QPainter-based rendering; no QLabel (avoids macOS widget shadows); normal mode = pass-through; edit mode = clickable with bbox outlines |
+| `EditPopup` | Floats over `TranslatorOverlay` in edit mode; pre-fills with OCR source + current translation; saves to glossary on confirm |
+| `ControlWindow` | Dark glass bar: pause, text input, translate, ⊕ edit-mode toggle, stop; result pills; autocomplete popup |
+| `AppController` | Creates shared `config`, `GlossaryService`, `TranslationPipeline`; wires `mode_changed` → `overlay.set_edit_mode()` |
+
+**Rendering notes:**
+- `fillRect(bbox_width)` for background — never extends beyond the bbox
+- `drawText` with `TextSingleLine` — prevents QPainter word-wrap
+- `NSWindow.setHasShadow_(False)` via PyObjC in `showEvent` — eliminates macOS compositor shadow
+- Font size = `max(10, int(bbox_height * 0.85))`
+
+**Edit mode:**
+- `ControlWindow` emits `mode_changed("edit")` when the ⊕ button is pressed.
+- `AppController` calls `overlay.set_edit_mode(True)`, which strips `WindowTransparentForInput`
+  from the overlay's window flags and calls `show()` to recreate the native window handle.
+- In edit mode `paintEvent` additionally draws `_BBOX_COLORS` outlines around each display item.
+- `mousePressEvent` hit-tests click coordinates against `display_items` bboxes and calls
+  `_show_edit_popup(item, pos)`.
+- `EditPopup` pre-fills `_src_label` with `item["src"]` (raw OCR text) and `QLineEdit` with
+  `item["trans"]` (current translation). On save it emits `saved(src_text, tgt_text)`.
+- `TranslatorOverlay._on_glossary_save` creates a `GlossaryEntry` and calls
+  `pipeline.glossary.add_entry(entry)` + `pipeline.clear_cache()`.
+- Exiting edit mode restores `WindowTransparentForInput` so the overlay becomes pass-through again.
+
+## Data flow (detailed)
+
+```
+capture.grab(roi, below_win_id)
+    → CGImageRef / mss.ScreenShot
+
+ocr.recognize(image, roi_w, roi_h, languages, custom_words)
+    → list[OCRBlock]  (text, bbox, conf; colors at defaults)
+
+color_sampler.annotate_colors(image, blocks, logical_w, logical_h)
+    → mutates block.text_color, block.bg_color  (macOS only)
+
+block_merger.merge_blocks_by_proximity(blocks)
+    → list[OCRBlock]  (sub_bboxes populated for merged groups)
+
+for each block:
+    pipeline.get_cached(block.text)           ← O(1) cache hit
+        hit  → fresh_translated.append(block)
+        miss → spatio-temporal match in _tracked (IoU > 0.8 + edit-dist < 2)
+                   match → reuse tracked.translation (no re-translate)
+                   no match → new_blocks / missing
+
+_tracked rebuilt: fresh hits (full TTL) + ghost survivors (TTL-1, TTL>0)
+emit result_ready(render_now)          ← fresh + state matches + ghosts
+
+[single consumer thread]  ← replaces stale pending job (drop-old)
+    pipeline.translate_missing(missing_texts)
+        glossary.protect(text)
+        engine_translate(protected_texts)
+        glossary.restore(result)
+        glossary.correct(result)
+        cache.put(normalized_text, final_result)
+    appends new _TrackedBlock entries to _tracked (under lock)
+
+emit result_ready(render_complete)     ← new translations + all ghosts
+
+TranslatorOverlay._flatten(blocks)
+    → list[{bbox, trans, text_color, bg_color, src}]
+    (splits translated text across sub_bboxes proportionally by char count;
+     "src" = raw OCR text for the sub-line, used by EditPopup)
+
+paintEvent draws each item in display_items (OCR blocks):
+    fillRect  → bg_color
+    drawText  → text_color, TextSingleLine
+```
+
+### User-input path (ControlWindow)
+
+Both paths display the result in `_result_row`: clickable `[input] → [translated]` pills.
+Clicking either pill copies it to the clipboard. Translation direction is reversed from OCR
+(user types target language, e.g. Chinese; receives source language, e.g. Korean).
+
+**Engine translation** (typed text + Enter / "翻譯"):
+
+```
+QLineEdit
+    │  user types text (target language) and presses Enter or "翻譯"
+    ▼
+_on_submit()
+    │  glossary protect: known target terms → __Tn__ placeholders
+    │  engine_translate([protected], reversed config)  ← synchronous; blocks briefly
+    │  glossary restore: placeholders → source terms
+    ▼
+_btn_tgt.setText(input_text)
+_btn_src.setText(translated_result)
+_result_row.show()
+```
+
+**Glossary lookup** (autocomplete popup):
+
+```
+QLineEdit.textChanged → _update_suggestions()   ← prefix-match glossary entries
+    │  user clicks a suggestion in the popup
+    ▼
+_on_suggestion_clicked()
+    │  no translation — direct from glossary entry
+    ▼
+_btn_tgt.setText(entry.target_term)
+_btn_src.setText(entry.source_term)
+_result_row.show()
+```
+
+## Testing
+
+Pure modules have no Qt or platform dependencies and can be tested without a display:
+
+```bash
+python -m pytest tests/ -v   # 50 tests, ~0.04 s
+```
+
+| Test file | Module under test | Key scenarios |
+|-----------|-------------------|---------------|
+| `tests/test_lru_cache.py` | `LRUCache` | eviction order, access refresh, clear |
+| `tests/test_glossary_service.py` | `GlossaryService` | CRUD, protect/restore roundtrip, persistence |
+| `tests/test_translation_pipeline.py` | `TranslationPipeline` | cache warmup, clear_cache, glossary integration |
+| `tests/test_block_merger.py` | `merge_blocks_by_proximity` | merge conditions, threshold boundaries, bbox math |
+
+Pipeline tests use `translator_engine: "dummy"` — no API key or network needed.
+
+## Coordinate systems
+
+| Space | Origin | Y direction | Used in |
+|-------|--------|------------|---------|
+| Screen logical | Top-left of screen | Down | Qt geometry, ROI |
+| Vision normalized | Bottom-left of image | Up | VNRecognizeTextRequest output |
+| CGImage physical | Top-left of image | Down | Quartz pixel sampling |
+
+**Vision → logical:** `px = nx * roi_w`, `py = (1 - ny - nh) * roi_h`
+
+**Logical → physical (Retina):** `scale = img_w / roi_w`; multiply before pixel access
