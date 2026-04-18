@@ -9,6 +9,13 @@ hotkey (default ``Ctrl+Alt+P``) lets them pause OCR without leaving the game.
 The pynput callback fires on a background thread; emitting a Qt signal from
 there is safe because Qt auto-promotes cross-thread signal delivery to a
 queued connection, which re-enters the GUI thread's event loop.
+
+macOS crash note: pynput's CGEventTap callback (_handler) is decorated with
+@_emitter, which re-raises any exception after storing it.  That re-raise
+escapes into the CoreGraphics C callback frame and causes a native abort().
+_SafeGlobalHotKeys wraps _handler in try/except BaseException so nothing
+ever escapes the Python boundary — caps-lock and other modifier events that
+pynput cannot map are silently discarded.
 """
 from __future__ import annotations
 
@@ -23,12 +30,11 @@ class HotkeyListener(QObject):
     def __init__(self, hotkey: str, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._hotkey = hotkey
-        self._listener = None  # pynput.keyboard.GlobalHotKeys — lazy-imported
+        self._listener = None  # _SafeGlobalHotKeys — lazy-imported
 
     def start(self) -> bool:
         """Start listening.  Returns True on success, False if pynput or the
-        OS accessibility permission is unavailable (we don't want a missing
-        hotkey to crash the app)."""
+        OS accessibility permission is unavailable."""
         if self._listener is not None:
             return True
         try:
@@ -36,18 +42,23 @@ class HotkeyListener(QObject):
         except Exception as e:
             print(f"[hotkey] pynput import failed: {e}")
             return False
+
+        # Subclass to swallow the re-raise that @_emitter performs after storing
+        # an exception.  Without this, a Caps Lock keypress (or any event that
+        # pynput cannot decode) raises inside the CGEventTap C callback and
+        # causes a native abort() that terminates the whole app.
+        class _SafeGlobalHotKeys(keyboard.GlobalHotKeys):
+            def _handler(self, proxy, event_type, event, refcon):
+                try:
+                    return super()._handler(proxy, event_type, event, refcon)
+                except BaseException:
+                    pass
+
         try:
-            # on_error suppresses pynput internal errors (e.g. Caps Lock on
-            # macOS triggers a CGEventTap error that would otherwise terminate
-            # the app — we log it and keep the listener alive).
-            self._listener = keyboard.GlobalHotKeys(
-                {self._hotkey: self._on_press},
-                on_error=self._on_error,
-            )
+            self._listener = _SafeGlobalHotKeys({self._hotkey: self._on_press})
             self._listener.start()
             return True
         except Exception as e:
-            # Invalid hotkey string or OS permission denied on macOS.
             print(f"[hotkey] failed to register '{self._hotkey}': {e}")
             self._listener = None
             return False
@@ -64,9 +75,3 @@ class HotkeyListener(QObject):
         # Runs on pynput's background thread — safe because Qt signals cross
         # threads via an auto-queued connection into the main event loop.
         self.triggered.emit()
-
-    @staticmethod
-    def _on_error(exc: Exception) -> None:
-        # Swallow CGEventTap / other internal pynput errors so they don't
-        # propagate to the thread's unhandled-exception handler and kill the app.
-        print(f"[hotkey] listener error (suppressed): {exc}")
