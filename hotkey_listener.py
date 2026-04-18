@@ -37,7 +37,13 @@ class HotkeyListener(QObject):
             print(f"[hotkey] pynput import failed: {e}")
             return False
         try:
-            self._listener = keyboard.GlobalHotKeys({self._hotkey: self._on_press})
+            # on_error suppresses pynput internal errors (e.g. Caps Lock on
+            # macOS triggers a CGEventTap error that would otherwise terminate
+            # the app — we log it and keep the listener alive).
+            self._listener = keyboard.GlobalHotKeys(
+                {self._hotkey: self._on_press},
+                on_error=self._on_error,
+            )
             self._listener.start()
             return True
         except Exception as e:
@@ -58,3 +64,9 @@ class HotkeyListener(QObject):
         # Runs on pynput's background thread — safe because Qt signals cross
         # threads via an auto-queued connection into the main event loop.
         self.triggered.emit()
+
+    @staticmethod
+    def _on_error(exc: Exception) -> None:
+        # Swallow CGEventTap / other internal pynput errors so they don't
+        # propagate to the thread's unhandled-exception handler and kill the app.
+        print(f"[hotkey] listener error (suppressed): {exc}")
