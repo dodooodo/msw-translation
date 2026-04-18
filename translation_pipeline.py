@@ -26,6 +26,31 @@ import unicodedata
 
 from translator_engine import LRUCache, engine_translate
 from glossary_service  import GlossaryService
+from language_descriptor import get as get_language
+from text_normalizer    import normalize_ocr_text
+
+
+# Unicode ranges that indicate actual source-language content worth translating.
+# Anything outside these ranges (ASCII, Latin-1 supplement like ¾/£, emoji,
+# currency symbols, etc.) is treated as non-translatable noise.
+_SOURCE_LANG_RANGES: dict[str, tuple[tuple[int, int], ...]] = {
+    "Korean":              ((0xAC00, 0xD7AF), (0x1100, 0x11FF), (0x3130, 0x318F)),
+    "Japanese":            ((0x3040, 0x309F), (0x30A0, 0x30FF), (0x4E00, 0x9FFF)),
+    "Traditional Chinese": ((0x4E00, 0x9FFF), (0x3400, 0x4DBF)),
+    "Simplified Chinese":  ((0x4E00, 0x9FFF), (0x3400, 0x4DBF)),
+}
+
+
+def has_source_content(text: str, source_lang: str) -> bool:
+    """True if `text` contains at least one character in the source language's
+    script. For English source, any letter counts. Used to skip OCR noise like
+    '¾', '£', or pure-ASCII UI elements that shouldn't hit the engine."""
+    if source_lang == "English":
+        return any(c.isalpha() and ord(c) < 128 for c in text)
+    ranges = _SOURCE_LANG_RANGES.get(source_lang)
+    if ranges is None:
+        return True
+    return any(lo <= ord(c) <= hi for c in text for lo, hi in ranges)
 
 
 class TranslationPipeline:
@@ -49,8 +74,7 @@ class TranslationPipeline:
     # Text normalization (applied to cache keys only, not translated content)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _normalize(text: str) -> str:
+    def _normalize(self, text: str) -> str:
         """
         Canonicalize OCR text for use as a cache key.
         Increases cache hit rate when Vision OCR produces minor variations
@@ -60,24 +84,56 @@ class TranslationPipeline:
         """
         # 1. NFC: combines decomposed Hangul jamo into precomposed syllables
         text = unicodedata.normalize("NFC", text)
-        # 2. Collapse internal whitespace variance (tabs, double-spaces, etc.)
-        text = re.sub(r'\s+', ' ', text).strip()
-        # 3. Remove stray single characters that Vision sometimes adds at edges
+        # 2. Legacy edge-char trim — Vision sometimes adds stray marks at edges
         text = text.strip("·•—…ㅡㅣ")
-        # 4. Collapse repeated CJK/punctuation (e.g. "!!" → "!")
+        # 3. Collapse repeated CJK/punctuation (e.g. "!!" → "!")
         text = re.sub(r'([。、！？·])\1+', r'\1', text)
+        # 4. Translumo-style CJK normalisation: punctuation swap, dot/quote
+        #    trim, whitespace collapse, optional language-specific tweaks.
+        desc = get_language(self.config.get("source_language", "Korean"))
+        text = normalize_ocr_text(
+            text,
+            is_asian=desc.asian,
+            use_end_punctuation=desc.use_end_punctuation,
+            use_space_remover=desc.use_space_remover,
+        )
         return text
 
     # ------------------------------------------------------------------
     # Cache access (hot path — called every OCR tick)
     # ------------------------------------------------------------------
 
+    # Fuzzy-match thresholds on rapidfuzz.fuzz.ratio's 0–100 scale.  Asian
+    # scripts lose fewer characters to OCR jitter per symbol than Latin text,
+    # so a tighter threshold is safe there; Translumo uses the same split
+    # (0.80 vs 0.65 on Jaro) for the same reason.
+    _FUZZY_THRESHOLD_ASIAN    = 95.0
+    _FUZZY_THRESHOLD_NONASIAN = 90.0
+
     def get_cached(self, raw_text: str) -> str | None:
-        """O(1) lookup. Returns None if the text has not been translated yet."""
-        return self._cache.get(self._normalize(raw_text))
+        """O(1) lookup, with a fuzzy fallback for jittery OCR output.
+
+        Exact-normalized match is tried first.  On miss, rapidfuzz scans the
+        most recent cache entries; if one is similar enough, its translation
+        is returned AND written back under the current key so future lookups
+        for the same jitter become O(1).
+        """
+        key = self._normalize(raw_text)
+        exact = self._cache.get(key)
+        if exact is not None:
+            return exact
+
+        desc = get_language(self.config.get("source_language", "Korean"))
+        threshold = (self._FUZZY_THRESHOLD_ASIAN
+                     if desc.asian else self._FUZZY_THRESHOLD_NONASIAN)
+        fuzzy = self._cache.get_or_similar(key, threshold=threshold)
+        if fuzzy is not None:
+            # Warm the exact key so next frame's lookup is O(1).
+            self._cache.put(key, fuzzy)
+        return fuzzy
 
     def is_cached(self, raw_text: str) -> bool:
-        return self._cache.get(self._normalize(raw_text)) is not None
+        return self.get_cached(raw_text) is not None
 
     # ------------------------------------------------------------------
     # Translation (cold path — called only on cache miss, in background thread)
@@ -109,8 +165,9 @@ class TranslationPipeline:
         ascii_pattern = re.compile(r'[A-Za-z0-9](?:[\x20-\x7E]*[A-Za-z0-9])?')
 
         for text in raw_texts:
-            # Skip translation for strings that are entirely English/numbers/symbols
-            if source_lang != "English" and all(ord(c) < 128 for c in text):
+            # Skip translation for strings with no source-language content
+            # (pure ASCII, Latin-1 glyphs like ¾/£, symbols, emoji, etc.)
+            if not has_source_content(text, source_lang):
                 self._cache.put(self._normalize(text), text)
                 continue
 

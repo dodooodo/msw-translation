@@ -20,12 +20,13 @@ import capture
 import ocr
 import color_sampler
 from block_merger        import merge_blocks_by_proximity
-from translation_pipeline import TranslationPipeline
+from translation_pipeline import TranslationPipeline, has_source_content
 from translator_engine   import engine_translate
 from glossary_service    import GlossaryService, GlossaryEntry
 from ocr_model           import OCRBlock
 from config_manager      import load_config, save_config
 from settings_ui         import SettingsDialog
+from hotkey_listener     import HotkeyListener
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +98,9 @@ class OCRWorker(QThread):
         self._job_event = threading.Event()
         self._translator_thread: threading.Thread | None = None
 
+        # Frame-diff skip: cache last capture hash to skip OCR on unchanged frames
+        self._last_fingerprint: int | None = None
+
     def _build_custom_words(self) -> list[str]:
         """Extract source-language glossary terms to hint the OCR engine."""
         if not self.pipeline.glossary:
@@ -133,8 +137,17 @@ class OCRWorker(QThread):
 
             interval = self.config.get("ocr_interval", 1.0)
 
-            # ---- Capture + OCR ----
-            image  = self._capture.grab(self.roi, self.overlay_win_id)
+            # ---- Capture ----
+            image = self._capture.grab(self.roi, self.overlay_win_id)
+
+            # ---- Frame-diff skip: reuse last tick if pixels are identical ----
+            fp = self._capture.fingerprint(image)
+            if fp is not None and fp == self._last_fingerprint and self._tracked:
+                time.sleep(interval)
+                continue
+            self._last_fingerprint = fp
+
+            # ---- OCR ----
             blocks = self._ocr.recognize(image,
                                          self.roi[2], self.roi[3],
                                          self._languages,
@@ -155,7 +168,7 @@ class OCRWorker(QThread):
                 b for b in blocks
                 if b.conf >= min_conf
                 and len(b.text.strip()) >= min_len
-                and (source_lang == "English" or not all(ord(c) < 128 for c in b.text))
+                and has_source_content(b.text, source_lang)
             ]
 
             linger_frames = self.config.get("linger_frames", 3)
@@ -189,14 +202,14 @@ class OCRWorker(QThread):
                     missing.append(b.text)
 
             # ---- Mechanism 4: rebuild tracked state with TTL ghost rendering ----
-            matched_norm = {TranslationPipeline._normalize(b.text)
+            matched_norm = {self.pipeline._normalize(b.text)
                             for b in fresh_translated + new_blocks}
             with self._tracked_lock:
                 new_tracked: list[_TrackedBlock] = []
                 for b in fresh_translated:
                     new_tracked.append(_TrackedBlock(b, b.translated, linger_frames))
                 for t in self._tracked:
-                    if TranslationPipeline._normalize(t.block.text) not in matched_norm:
+                    if self.pipeline._normalize(t.block.text) not in matched_norm:
                         t.ttl -= 1
                         if t.ttl > 0:
                             new_tracked.append(t)   # ghost: keep rendering last known state
@@ -1220,7 +1233,7 @@ class ControlWindow(QMainWindow):
         self._banner_action.setText("立即更新")
         try:
             self._banner_action.clicked.disconnect()
-        except RuntimeError:
+        except (RuntimeError, TypeError):
             pass
         self._banner_action.clicked.connect(
             lambda: self._on_glossary_update_clicked(remote_version)
@@ -1233,7 +1246,7 @@ class ControlWindow(QMainWindow):
         self._banner_action.setText("前往下載")
         try:
             self._banner_action.clicked.disconnect()
-        except RuntimeError:
+        except (RuntimeError, TypeError):
             pass
         self._banner_action.clicked.connect(self._on_app_update_clicked)
         self._update_banner.show()
@@ -1466,8 +1479,21 @@ class AppController:
         self._pending_app_update: str | None = None
         self._pending_glossary_version: int | None = None
 
+        # Global pause hotkey — lets users pause OCR from inside a fullscreen
+        # game without alt-tabbing. No-op when the ROI selector is showing.
+        self._hotkey = HotkeyListener(
+            self._config.get("hotkey_pause", "<ctrl>+<alt>+p")
+        )
+        self._hotkey.triggered.connect(self._on_pause_hotkey)
+        self._hotkey.start()
+
         self._start_update_check()
         self.show_selector()
+
+    def _on_pause_hotkey(self) -> None:
+        # Only meaningful when the overlay is live; otherwise ignored.
+        if self.control is not None:
+            self.control._toggle_pause()
 
     def _start_update_check(self) -> None:
         from update_checker import UpdateCheckerThread

@@ -26,10 +26,13 @@ bbox_visualizer.py      Thin wrapper — launches BBoxOnlyController (no transla
 ocr_model.py            OCRBlock dataclass — the single data type for the whole pipeline
 block_merger.py         merge_blocks_by_proximity — pure Python, no platform deps
 color_sampler.py        Pixel color sampling from CGImage — macOS only, no-op elsewhere
-translator_engine.py    Thread-safe LRUCache + raw engine dispatch (Apple / Windows / Google / Dummy)
+translator_engine.py    Thread-safe LRUCache (+ fuzzy get_or_similar) + raw engine dispatch
 glossary_service.py     GlossaryEntry dataclass + CRUD + protect/restore/correct
 translation_pipeline.py TranslationPipeline — pre-process → engine → post-process + cache
 community_glossary.py   GlossaryMeta dataclass + fetch_index() / fetch_glossary() via urllib
+language_descriptor.py  LanguageDescriptor dataclass — per-language flags (asian, use_space_remover, …)
+text_normalizer.py      normalize_ocr_text() — CJK/full-width punct → ASCII, whitespace collapse
+hotkey_listener.py      HotkeyListener(QObject) — global pause/resume hotkey via pynput
 
 capture/                Platform screenshot abstraction
   __init__.py             get_provider() factory
@@ -56,13 +59,20 @@ translate_windows.csproj  .NET project for translate_windows.cs
 
 translator.spec         PyInstaller build spec (onedir + BUNDLE for macOS; onefile for Win/Linux)
 .github/workflows/
-  release.yml           CI matrix build: macOS arm64 / Windows x64 / Linux x64 on v* tags
+  ci.yml                CI: run tests on every push and PR (macOS / Windows / Linux matrix)
+  release.yml           CI: run tests then build + release on v* tags
 
 tests/                  pytest test suite (pure modules only — no Qt, no display needed)
-  test_lru_cache.py       LRUCache eviction and access-order tests
-  test_glossary_service.py  CRUD, protect/restore roundtrip, persistence
+  test_lru_cache.py           LRUCache eviction, access-order, fuzzy get_or_similar
+  test_glossary_service.py    CRUD, protect/restore roundtrip, persistence
   test_translation_pipeline.py  Cache warmup, clear_cache, glossary integration
-  test_block_merger.py    Merge conditions, threshold boundaries, bbox math
+  test_block_merger.py        Merge conditions, threshold boundaries, bbox math
+  test_config_manager.py      load/save defaults, key merging, malformed JSON fallback
+  test_community_glossary.py  _parse_entries edge cases; fetch_index/fetch_glossary (mocked urllib)
+  test_update_checker.py      _version_tuple parsing and comparison (pure function, no Qt)
+  test_ocr_model.py           OCRBlock defaults and is_merged property
+  test_language_descriptor.py LanguageDescriptor lookup by display name, flag values
+  test_text_normalizer.py     CJK_PUNCT_MAP entries, normalize_ocr_text flag branches
 
 doc/                    Developer documentation
   architecture.md         Data flow, module responsibilities, design decisions
@@ -76,7 +86,8 @@ doc/                    Developer documentation
 
 - **No Qt in pure modules.** `ocr_model`, `block_merger`, `color_sampler`,
   `translator_engine`, `glossary_service`, `translation_pipeline`, `community_glossary`,
-  `capture/`, `ocr/` — none import PyQt6. Safe to test without a display.
+  `language_descriptor`, `text_normalizer`, `capture/`, `ocr/` — none import PyQt6.
+  Safe to test without a display. (`hotkey_listener` imports PyQt6 but has no widget deps.)
 
 - **Non-blocking OCR loop with state tracking.** `OCRWorker.run()` never
   waits on an API call. Each tick classifies OCR blocks in priority order:
@@ -87,10 +98,13 @@ doc/                    Developer documentation
   after OCR misses, preventing flicker from brief detection failures.
 
 - **Cache key = normalized OCR text.** `TranslationPipeline._normalize()` applies
-  NFC unicode composition, whitespace collapse, and stray-character stripping before
-  the cache lookup, so minor frame-to-frame OCR variations hit the same entry.
-  Cached value = fully post-processed final result (glossary applied). O(1) hit for
-  the ~95 % of frames that repeat. Call `pipeline.clear_cache()` when glossary entries change.
+  NFC unicode composition, CJK punctuation canonicalization (`text_normalizer`), whitespace
+  collapse, and stray-character stripping so minor frame-to-frame OCR variations (different
+  OCR engines encoding `，` vs `,`, fullwidth digits, etc.) all hash to the same entry.
+  On an exact-key miss `get_cached()` falls back to a rapidfuzz fuzzy scan over the most
+  recent 64 entries (threshold: 95% Asian, 90% non-Asian) — jittery OCR still hits the
+  cache without a re-translation. Cached value = fully post-processed final result (glossary
+  applied). Call `pipeline.clear_cache()` when glossary entries change.
 
 - **Platform isolation.** All macOS-specific code lives in `capture/mac.py`,
   `ocr/mac.py`, and `color_sampler.py`. Windows-specific code lives in
@@ -135,6 +149,7 @@ doc/                    Developer documentation
 | `merge_gap_ratio` | `0.8` | Vertical gap must be < avg\_height × this value to merge (`block_merger`) |
 | `merge_min_h_overlap` | `0.3` | Horizontal overlap must be ≥ this fraction of the narrower block's width (`block_merger`) |
 | `community_glossary_seen_version` | `0` | Last community glossary `index.json` version the user has seen; compared against remote on startup |
+| `hotkey_pause` | `"<ctrl>+<alt>+p"` | Global pause/resume hotkey (pynput format); registered by `HotkeyListener` in `AppController`; no-op when selector is showing |
 
 ## Running tests
 
@@ -142,8 +157,9 @@ doc/                    Developer documentation
 uv run python -m pytest tests/ -v
 ```
 
-All 50 tests cover the four pure modules and run in ~0.04 s with no display.
+All 132 tests cover 10 pure modules and run in ~0.11 s with no display.
 The `dummy` engine (returns originals) is used in pipeline tests — no API key or network needed.
+Network calls in community_glossary tests are mocked with `unittest.mock.patch`.
 
 ## Building a release
 
@@ -167,6 +183,7 @@ automatically attached to the GitHub Release.
 - **Wrong bbox positions or bad merges** → `uv run bbox_visualizer.py`
 - **Wrong colors** → add `print` in `color_sampler._sample_block`, check `is_bgra` and `sx/sy`
 - **Translation not updating** → check `pipeline._cache` length; confirm `missing_texts` is non-empty
+- **Global hotkey not working** → macOS: Accessibility permission required (System Settings → Privacy → Accessibility); check `config["hotkey_pause"]` for valid pynput format (e.g. `"<ctrl>+<alt>+p"`); console prints `[hotkey] failed to register ...` on error
 - **Platform import errors** → check `sys.platform` value; macOS = `"darwin"`, Windows = `"win32"`
 - **Windows OCR errors** → confirm `winrt-Windows.Media.Ocr` is installed; check language pack availability
 - **Windows translation errors** → requires Win 11 24H2+; falls back to originals on older builds

@@ -1,81 +1,137 @@
 // translate_apple.swift
 // macOS 26 Translation framework helper for msw_translation overlay
-// 使用 SwiftUI + .translationTask()，可自動觸發語言模型下載 UI
+// Long-running daemon mode: reads JSON lines from stdin, writes JSON lines to stdout.
 //
 // 編譯方式 (Python 會自動執行):
 //   swiftc translate_apple.swift -o translate_apple
 //
 // 使用方式:
-//   echo '{"texts":["안녕하세요"],"source":"ko","target":"zh-Hant"}' | ./translate_apple
+//   ./translate_apple ko zh-Hant
+//   Then send JSON lines on stdin, one per line:
+//     {"texts":["안녕하세요","감사합니다"]}
+//   Each line produces one JSON array line on stdout:
+//     ["你好","謝謝"]
 
 import AppKit
 import Foundation
 import SwiftUI
 import Translation
 
+// MARK: - Data Types
+
 struct Payload: Decodable {
     let texts: [String]
-    let source: String  // e.g. "ko", "ja", "en"
-    let target: String  // e.g. "zh-Hant", "zh-Hans", "en"
 }
 
-// MARK: - SwiftUI View
+// MARK: - Argument Parsing
+
+guard CommandLine.arguments.count >= 3 else {
+    fputs("Usage: translate_apple <source_lang> <target_lang>\n", stderr)
+    fputs("  Then send JSON lines on stdin: {\"texts\":[\"...\"]}\n", stderr)
+    exit(1)
+}
+
+let sourceLang = CommandLine.arguments[1]  // e.g. "ko"
+let targetLang = CommandLine.arguments[2]  // e.g. "zh-Hant"
+
+guard #available(macOS 26.0, *) else {
+    fputs("translate_apple: Requires macOS 26.0+\n", stderr)
+    // Legacy mode: echo back originals for each stdin line until EOF
+    while let line = readLine() {
+        guard let data = line.data(using: .utf8),
+              let payload = try? JSONDecoder().decode(Payload.self, from: data) else {
+            print("[]")
+            fflush(stdout)
+            continue
+        }
+        let fallback = try! JSONEncoder().encode(payload.texts)
+        print(String(data: fallback, encoding: .utf8)!)
+        fflush(stdout)
+    }
+    exit(0)
+}
+
+// MARK: - Session Actor
+//
+// Owns the TranslationSession.  All translate calls are serialised through
+// this actor so we never have concurrent session access.
 
 @available(macOS 26.0, *)
-struct TranslatorView: View {
-    let payload: Payload
+actor SessionActor {
+    private var session: TranslationSession?
+
+    func setSession(_ s: TranslationSession) {
+        self.session = s
+    }
+
+    func translate(_ texts: [String]) async -> [String] {
+        guard let session else { return texts }
+        do {
+            let requests = texts.enumerated().map { idx, text in
+                TranslationSession.Request(sourceText: text, clientIdentifier: "\(idx)")
+            }
+            let responses = try await session.translations(from: requests)
+            var resultMap = [Int: String]()
+            for r in responses {
+                if let idStr = r.clientIdentifier, let idx = Int(idStr) {
+                    resultMap[idx] = r.targetText
+                }
+            }
+            return texts.enumerated().map { idx, orig in resultMap[idx] ?? orig }
+        } catch {
+            fputs("translate_apple: Translation error: \(error.localizedDescription)\n", stderr)
+            return texts
+        }
+    }
+}
+
+// MARK: - SwiftUI Daemon View
+
+@available(macOS 26.0, *)
+struct TranslatorDaemonView: View {
     let config: TranslationSession.Configuration
+    let sessionActor: SessionActor
 
     var body: some View {
         Color.clear
             .translationTask(config) { session in
-                do {
-                    let requests = payload.texts.enumerated().map { index, text in
-                        TranslationSession.Request(sourceText: text, clientIdentifier: "\(index)")
-                    }
-                    let responses = try await session.translations(from: requests)
+                // Hand the live session to the actor, then start the stdin loop
+                await sessionActor.setSession(session)
 
-                    var resultMap = [Int: String]()
-                    for r in responses {
-                        if let idStr = r.clientIdentifier, let idx = Int(idStr) {
-                            resultMap[idx] = r.targetText
+                // Process stdin lines on a background task so we never block
+                // the main run loop (which drives the session).
+                await Task.detached(priority: .userInitiated) {
+                    while let line = readLine() {
+                        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !trimmed.isEmpty,
+                              let data = trimmed.data(using: .utf8),
+                              let payload = try? JSONDecoder().decode(Payload.self, from: data)
+                        else {
+                            print("[]")
+                            fflush(stdout)
+                            continue
                         }
-                    }
-                    let results = payload.texts.enumerated().map { idx, orig in
-                        resultMap[idx] ?? orig
-                    }
 
-                    let outData = try JSONEncoder().encode(results)
-                    print(String(data: outData, encoding: .utf8)!)
-                } catch {
-                    fputs("translate_apple: Translation error: \(error.localizedDescription)\n", stderr)
-                    // 失敗回傳原文
-                    let fallback = try! JSONEncoder().encode(payload.texts)
-                    print(String(data: fallback, encoding: .utf8)!)
-                }
-                NSApp.terminate(nil)
+                        let results = await sessionActor.translate(payload.texts)
+                        let outData = (try? JSONEncoder().encode(results))
+                            ?? (try! JSONEncoder().encode(payload.texts))
+                        print(String(data: outData, encoding: .utf8)!)
+                        fflush(stdout)
+                    }
+                    // stdin closed — exit cleanly
+                    await MainActor.run { NSApp.terminate(nil) }
+                }.value
             }
     }
 }
 
 // MARK: - Entry Point
 
-let rawData = FileHandle.standardInput.readDataToEndOfFile()
-guard let payload = try? JSONDecoder().decode(Payload.self, from: rawData) else {
-    fputs("translate_apple: Invalid JSON input\n", stderr)
-    exit(1)
-}
-
-guard #available(macOS 26.0, *) else {
-    fputs("translate_apple: Requires macOS 26.0+\n", stderr)
-    let fallback = try! JSONEncoder().encode(payload.texts)
-    print(String(data: fallback, encoding: .utf8)!)
-    exit(0)
-}
+let sessionActor = SessionActor()
 
 let config = TranslationSession.Configuration(
-    source: Locale.Language(identifier: payload.source),
-    target: Locale.Language(identifier: payload.target)
+    source: Locale.Language(identifier: sourceLang),
+    target: Locale.Language(identifier: targetLang)
 )
 
 let app = NSApplication.shared
@@ -94,7 +150,9 @@ window.backgroundColor = .clear
 window.level = .floating
 window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
-let hostingView = NSHostingView(rootView: TranslatorView(payload: payload, config: config))
+let hostingView = NSHostingView(
+    rootView: TranslatorDaemonView(config: config, sessionActor: sessionActor)
+)
 hostingView.frame = NSRect(x: 0, y: 0, width: 1, height: 1)
 window.contentView = hostingView
 window.makeKeyAndOrderFront(nil)

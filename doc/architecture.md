@@ -119,6 +119,36 @@ Three conditions must all hold:
 Merged blocks carry `sub_bboxes / sub_texts / sub_colors` so the renderer
 can position each translated line at its original row's pixel location.
 
+### Language descriptor (`language_descriptor.py`)
+
+`LanguageDescriptor` is a frozen dataclass that bundles all per-language flags in one
+place, replacing scattered `if lang == "Korean"` branches across the codebase.
+
+| Field | Purpose |
+|-------|---------|
+| `code` | BCP-47 tag (`"ko-KR"`) |
+| `display_name` | Matches `config["source_language"]` values |
+| `asian` | Selects fuzzy-cache threshold (95% vs 90%) |
+| `use_end_punctuation` | Append trailing period for European languages |
+| `use_space_remover` | Collapse spaces for CJK cache keys (Japanese/Chinese) |
+| `use_word_tokenizer` | Reserved |
+| `ocr_languages` | Hints passed to the OCR provider |
+
+`get(display_name)` is the sole lookup function; falls back to Korean if unknown.
+`ocr/__init__.py` derives `OCR_LANG_MAP` directly from `LANGUAGES` so the two are
+never out of sync.
+
+### OCR text normalizer (`text_normalizer.py`)
+
+`normalize_ocr_text(text, *, is_asian, use_end_punctuation, use_space_remover) -> str`
+canonicalizes OCR output for use as a cache key. Different OCR engines encode the same
+glyph differently (Apple Vision → `，` U+FF0C; Windows OCR → `,` U+002C), creating
+duplicate cache entries. The normalizer collapses 36 CJK punctuation/fullwidth-digit
+variants to ASCII equivalents, trims stray edge characters, and optionally applies
+language-specific rules from `LanguageDescriptor`.
+
+Applied to **keys only** — raw text is still sent to the translation engine unmodified.
+
 ### Translation engine (`translator_engine.py`)
 
 Responsibility: raw API calls only. No cache, no glossary, no pipeline logic.
@@ -126,6 +156,12 @@ Responsibility: raw API calls only. No cache, no glossary, no pipeline logic.
 `LRUCache` is thread-safe: all `get()`, `put()`, `clear()`, `__len__()` operations
 are guarded by a `threading.Lock` to prevent `OrderedDict` corruption under
 concurrent access from the OCR worker loop and translation consumer thread.
+
+`get_or_similar(key, threshold=95.0, scan_limit=64) -> str | None` — fuzzy fallback
+for jittery OCR output. Tries an exact lookup first; on miss, scans the `scan_limit`
+most-recently-used entries with `rapidfuzz.fuzz.ratio` and returns the best result
+above `threshold`, or `None`. Called by `TranslationPipeline.get_cached()` when the
+normalized exact lookup misses.
 
 | Engine | Implementation | Platform |
 |--------|---------------|---------|
@@ -201,10 +237,14 @@ Orchestrates the full lifecycle: pre-process → engine → post-process + cache
 Injected into `OCRWorker` and any future user-input widget from `AppController`.
 
 **Cache strategy (performance-critical):**
-- Key = `_normalize(raw_text)` — NFC composition + whitespace collapse + stray-char strip
+- Key = `_normalize(raw_text)` — NFC composition → CJK punct canonicalization
+  (`text_normalizer`) → whitespace collapse → language-specific rules
+  (trailing period, space removal) from `LanguageDescriptor`
 - Value = fully post-processed final result
-- Cache hit: `O(1)` dict lookup, zero glossary overhead
-- Cache miss: full pipeline runs once; result stored; never repeated for that text
+- **Exact hit:** `O(1)` dict lookup, zero glossary overhead
+- **Fuzzy hit:** rapidfuzz scan over last 64 MRU entries (threshold 95%/90% Asian/non-Asian);
+  if match found, result is written back under the exact key so next frame is O(1)
+- **Miss:** full pipeline runs once; result stored; never repeated for that text
 - Call `clear_cache()` after glossary changes
 
 `translate_missing(texts)` — warms cache; intended for background threads.
@@ -247,7 +287,7 @@ hints, biasing the OCR engine toward known game vocabulary and reducing variance
 | `TranslatorOverlay` | QPainter-based rendering; no QLabel (avoids macOS widget shadows); normal mode = pass-through; edit mode = clickable with bbox outlines |
 | `EditPopup` | Floats over `TranslatorOverlay` in edit mode; pre-fills with OCR source + current translation; saves to glossary on confirm |
 | `ControlWindow` | Dark glass bar: pause, text input, translate, ⊕ edit-mode toggle, stop; result pills; autocomplete popup; amber update banner (hidden until update detected) |
-| `AppController` | Creates shared `config`, `GlossaryService`, `TranslationPipeline`; starts `UpdateCheckerThread`; wires `mode_changed` → `overlay.set_edit_mode()`; buffers pending update signals until `ControlWindow` exists |
+| `AppController` | Creates shared `config`, `GlossaryService`, `TranslationPipeline`; starts `UpdateCheckerThread`; starts `HotkeyListener` (global pause key); wires `mode_changed` → `overlay.set_edit_mode()`; buffers pending update signals until `ControlWindow` exists |
 
 **Rendering notes:**
 - `fillRect(bbox_width)` for background — never extends beyond the bbox
@@ -284,8 +324,10 @@ block_merger.merge_blocks_by_proximity(blocks)
     → list[OCRBlock]  (sub_bboxes populated for merged groups)
 
 for each block:
-    pipeline.get_cached(block.text)           ← O(1) cache hit
-        hit  → fresh_translated.append(block)
+    pipeline.get_cached(block.text)
+        exact hit  → O(1) cache lookup → fresh_translated.append(block)
+        fuzzy hit  → rapidfuzz scan (last 64 MRU, threshold 95%/90%)
+                     → warms exact key → fresh_translated.append(block)
         miss → spatio-temporal match in _tracked (IoU > 0.8 + edit-dist < 2)
                    match → reuse tracked.translation (no re-translate)
                    no match → new_blocks / missing
@@ -355,15 +397,21 @@ _result_row.show()
 Pure modules have no Qt or platform dependencies and can be tested without a display:
 
 ```bash
-python -m pytest tests/ -v   # 50 tests, ~0.04 s
+uv run python -m pytest tests/ -v   # 132 tests, ~0.11 s
 ```
 
 | Test file | Module under test | Key scenarios |
 |-----------|-------------------|---------------|
-| `tests/test_lru_cache.py` | `LRUCache` | eviction order, access refresh, clear |
+| `tests/test_lru_cache.py` | `LRUCache` | eviction order, access refresh, clear, fuzzy get_or_similar |
 | `tests/test_glossary_service.py` | `GlossaryService` | CRUD, protect/restore roundtrip, persistence |
 | `tests/test_translation_pipeline.py` | `TranslationPipeline` | cache warmup, clear_cache, glossary integration |
 | `tests/test_block_merger.py` | `merge_blocks_by_proximity` | merge conditions, threshold boundaries, bbox math |
+| `tests/test_config_manager.py` | `load_config` / `save_config` | defaults, key merging, malformed JSON fallback |
+| `tests/test_community_glossary.py` | `community_glossary` | parse_entries edge cases; fetch_index/fetch_glossary (mocked urllib) |
+| `tests/test_update_checker.py` | `_version_tuple` | parsing, comparison (pure function, no Qt) |
+| `tests/test_ocr_model.py` | `OCRBlock` | defaults, is_merged property |
+| `tests/test_language_descriptor.py` | `language_descriptor` | lookup by display name, flag values per language |
+| `tests/test_text_normalizer.py` | `text_normalizer` | all 36 CJK_PUNCT_MAP entries, normalize_ocr_text flag branches |
 
 Pipeline tests use `translator_engine: "dummy"` — no API key or network needed.
 

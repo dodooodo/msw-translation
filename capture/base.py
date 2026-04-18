@@ -19,3 +19,11 @@ class CaptureProvider(ABC):
         Returns a platform-specific image object suitable for the
         corresponding OCRProvider.
         """
+
+    def fingerprint(self, image: Any) -> int | None:
+        """
+        Return a content hash of the captured image, or None if unavailable.
+        Same pixels → same hash; used to skip OCR on unchanged frames.
+        Default: None (no skip). Platform providers override.
+        """
+        return None

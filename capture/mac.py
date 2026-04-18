@@ -28,3 +28,14 @@ class MacCaptureProvider(CaptureProvider):
             )
 
         return cg_image  # CGImageRef or None
+
+    def fingerprint(self, image) -> int | None:
+        """Hash raw pixel bytes. Returns None if the image cannot be read."""
+        if image is None:
+            return None
+        try:
+            dp = Quartz.CGImageGetDataProvider(image)
+            cf_data = Quartz.CGDataProviderCopyData(dp)
+            return hash(bytes(cf_data))
+        except Exception:
+            return None

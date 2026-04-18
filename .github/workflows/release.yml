@@ -34,6 +34,10 @@ jobs:
       - name: Install Python dependencies
         run: uv sync --all-extras
 
+      # ── Tests ────────────────────────────────────────────────────────────
+      - name: Run tests
+        run: uv run python -m pytest tests/ -v
+
       # ── Platform-specific build steps ────────────────────────────────────
 
       - name: Compile translate_apple (macOS)

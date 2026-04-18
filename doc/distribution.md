@@ -22,25 +22,31 @@ git push origin v1.2.3
 `.github/workflows/release.yml` runs three parallel jobs (one per platform),
 each producing a zipped artifact. All three are uploaded to the same GitHub Release.
 
+`.github/workflows/ci.yml` runs the test suite on every push and pull request
+(all three platforms, no build step) so regressions are caught before tagging.
+
 ### What each CI job does
 
 **macOS**
-1. `swiftc translate_apple.swift -o translate_apple` — compiles Swift translation helper
-2. `uv sync` — installs Python deps
-3. `pyinstaller translator.spec` — builds `dist/MSW Translator.app` (onedir + BUNDLE)
-4. Zips the `.app` and uploads to the Release
+1. `uv sync` — installs Python deps
+2. `pytest tests/ -v` — runs the full test suite (fails fast on any regression)
+3. `swiftc translate_apple.swift -o translate_apple` — compiles Swift translation helper
+4. `pyinstaller translator.spec` — builds `dist/MSW Translator.app` (onedir + BUNDLE)
+5. Zips the `.app` and uploads to the Release
 
 **Windows**
-1. `dotnet publish translate_windows.csproj -r win-x64` — compiles C# translation helper
-2. `uv sync` — installs Python deps (includes `winrt-*` packages)
-3. `pyinstaller translator.spec` — builds `dist/MSW Translator.exe` (onefile)
-4. Zips the `.exe` and uploads to the Release
+1. `uv sync` — installs Python deps (includes `winrt-*` packages)
+2. `pytest tests/ -v` — runs the full test suite
+3. `dotnet publish translate_windows.csproj -r win-x64` — compiles C# translation helper
+4. `pyinstaller translator.spec` — builds `dist/MSW Translator.exe` (onefile)
+5. Zips the `.exe` and uploads to the Release
 
 **Linux**
 1. `apt install tesseract-ocr tesseract-ocr-kor …` — installs OCR engine + language packs
 2. `uv sync` — installs Python deps
-3. `pyinstaller translator.spec` — builds `dist/MSW Translator/` folder (onefile)
-4. Tarballs the folder and uploads to the Release
+3. `pytest tests/ -v` — runs the full test suite
+4. `pyinstaller translator.spec` — builds `dist/MSW Translator/` folder (onefile)
+5. Tarballs the folder and uploads to the Release
 
 ## Building locally (macOS)
 

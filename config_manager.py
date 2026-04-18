@@ -23,6 +23,8 @@ DEFAULT_CONFIG = {
     "merge_min_h_overlap":    0.3,  # horizontal overlap must be ≥ this fraction of the narrower block
     # Update tracking
     "community_glossary_seen_version": 0,  # last community glossary index version seen by user
+    # Global hotkey (toggle pause from inside fullscreen games — pynput format)
+    "hotkey_pause": "<ctrl>+<alt>+p",
 }
 
 def load_config():

@@ -1,5 +1,6 @@
 # msw_translation
 
+[![CI](https://github.com/dodooodo/msw-translation/actions/workflows/ci.yml/badge.svg)](https://github.com/dodooodo/msw-translation/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-blue)](https://github.com/dodooodo/msw-translation/releases)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
@@ -47,7 +48,7 @@ uv resolves and installs all dependencies automatically.
 1. Drag to select the game text area
 2. Click **✅ 確認並開始翻譯** to start
 3. Translated text appears as an overlay in real time
-4. Click **⏸ 暫停** to freeze / clear the display
+4. Click **⏸ 暫停** (or press `Ctrl+Alt+P` globally) to freeze / clear the display
 5. Click **⏹️ 退出並重新截圖** to re-select the area
 
 ---
@@ -174,6 +175,15 @@ Minimum horizontal overlap (fraction of the narrower block's width) to merge ver
 ### `linger_frames` (default: `3`)
 Ticks to ghost-render a block after OCR miss (~0.6 s at default interval).
 
+### `hotkey_pause` (default: `"<ctrl>+<alt>+p"`)
+Global keyboard shortcut to pause/resume OCR from inside a fullscreen game — no
+alt-tab required. Uses pynput format: modifier keys in angle brackets
+(`<ctrl>`, `<alt>`, `<shift>`, `<cmd>`), regular keys bare (`p`, `f9`, etc.).
+
+> **macOS note:** pynput requires Accessibility permission.
+> System Settings → Privacy & Security → Accessibility → grant permission to the app.
+> This is the same permission already needed for Quartz screen capture.
+
 ---
 
 ## Debug tool
@@ -206,10 +216,13 @@ bbox_visualizer.py      OCR debug visualiser
 ocr_model.py            Shared OCRBlock dataclass
 block_merger.py         Line merging logic
 color_sampler.py        Pixel color analysis (macOS)
-translator_engine.py    Translation engine dispatch
+translator_engine.py    Translation engine dispatch + LRU cache
 glossary_service.py     Glossary term protection
 translation_pipeline.py Full pre→translate→post pipeline
 community_glossary.py   Community glossary fetch (GitHub)
+language_descriptor.py  Per-language flags (asian, space-remover, …)
+text_normalizer.py      CJK punctuation normalizer for cache keys
+hotkey_listener.py      Global pause hotkey bridge (pynput → Qt signal)
 
 capture/                Platform screenshot abstraction
   mac.py                  Quartz (macOS)

@@ -8,6 +8,13 @@ requires-python = ">=3.11"
 dependencies = [
     "PyQt6>=6.6",
     "Pillow>=10.0",
+    # Fuzzy string matching for cache lookup on jittery OCR output
+    "rapidfuzz>=3.6",
+    # Global keyboard hotkey (pause OCR while inside a fullscreen game)
+    "pynput>=1.7",
+    # macOS: Quartz screen capture + Apple Vision OCR
+    "pyobjc-framework-Quartz>=9.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Vision>=9.0; sys_platform == 'darwin'",
     # Cross-platform screenshot (Windows / Linux)
     "mss>=9.0; sys_platform != 'darwin'",
     # OCR fallback (Linux only — Windows uses Windows.Media.Ocr, macOS uses Apple Vision)

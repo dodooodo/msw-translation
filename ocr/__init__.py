@@ -2,15 +2,13 @@
 
 import sys
 from ocr.base import OCRProvider
+from language_descriptor import LANGUAGES
 
-# Single definition of the language map — replaces the identical dicts
-# that previously existed in OCRWorker and RawOCRWorker.
+# Thin wrapper over LANGUAGES so OCR worker code can keep using dict-lookup style.
+# The list shape is preserved because OCRProvider.recognize() expects a list,
+# even though each language currently exposes exactly one BCP-47 tag.
 OCR_LANG_MAP: dict[str, list[str]] = {
-    "Korean":             ["ko-KR"],
-    "Japanese":           ["ja-JP"],
-    "English":            ["en-US"],
-    "Traditional Chinese":["zh-Hant"],
-    "Simplified Chinese": ["zh-Hans"],
+    name: list(desc.ocr_languages) for name, desc in LANGUAGES.items()
 }
 
 

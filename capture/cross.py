@@ -21,3 +21,12 @@ class MssCaptureProvider(CaptureProvider):
         monitor = {"left": x, "top": y, "width": w, "height": h}
         with mss.mss() as sct:
             return sct.grab(monitor)  # mss.ScreenShot
+
+    def fingerprint(self, image) -> int | None:
+        """Hash raw BGRA bytes. Returns None if the image cannot be read."""
+        if image is None:
+            return None
+        try:
+            return hash(bytes(image.raw))
+        except Exception:
+            return None
