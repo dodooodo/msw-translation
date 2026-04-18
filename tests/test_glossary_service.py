@@ -124,3 +124,109 @@ def test_protect_restore_roundtrip(tmp_path):
     restored = g.restore(protected, pmap)
     assert "星之力" in restored
     assert "스타포스" not in restored
+
+
+# ------------------------------------------------------------------
+# fuzzy fallback (Pass 2 — OCR character confusion tolerance)
+# ------------------------------------------------------------------
+
+def test_protect_fuzzy_single_char_error(tmp_path):
+    """OCR confuses 우→무: '듀얼 보무건' should still match '듀얼 보우건'."""
+    g = GlossaryService(path=str(tmp_path / "g.json"))
+    g.add_entry(_entry("듀얼 보우건", "雙弩槍"))
+    text, pmap = g.protect("듀얼 보무건", SRC, TGT)
+    assert len(pmap) == 1
+    assert "雙弩槍" in pmap.values()
+    assert "보무건" not in text
+
+
+def test_protect_fuzzy_short_term_single_error(tmp_path):
+    """3-char term with 1 OCR error should match (67% > 66% threshold)."""
+    g = GlossaryService(path=str(tmp_path / "g.json"))
+    g.add_entry(_entry("공격력", "攻擊力"))
+    text, pmap = g.protect("공겨력 증가", SRC, TGT)
+    assert len(pmap) == 1
+    assert "攻擊力" in pmap.values()
+
+
+def test_protect_fuzzy_skips_single_char_terms(tmp_path):
+    """Single-char terms are too short for fuzzy — should not match."""
+    g = GlossaryService(path=str(tmp_path / "g.json"))
+    g.add_entry(_entry("무", "武"))
+    text, pmap = g.protect("우", SRC, TGT)
+    assert pmap == {}
+    assert text == "우"
+
+
+def test_protect_fuzzy_no_false_positive(tmp_path):
+    """Completely unrelated text must not fuzzy-match a glossary entry."""
+    g = GlossaryService(path=str(tmp_path / "g.json"))
+    g.add_entry(_entry("듀얼 보우건", "雙弩槍"))
+    text, pmap = g.protect("완전 다른 텍스트입니다", SRC, TGT)
+    assert pmap == {}
+
+
+def test_protect_exact_preferred_over_fuzzy(tmp_path):
+    """When text matches exactly, exact path wins (Pass 1 before Pass 2)."""
+    g = GlossaryService(path=str(tmp_path / "g.json"))
+    g.add_entry(_entry("스타포스", "星之力"))
+    text, pmap = g.protect("스타포스 강화", SRC, TGT)
+    assert len(pmap) == 1
+    assert "__T0__" in text
+
+
+def test_protect_fuzzy_threshold_boundary(tmp_path):
+    """2-char term with 1 error = distance 1 = max_distance: should still match.
+    A 2-char term with 2 errors (beyond budget) should be rejected."""
+    g = GlossaryService(path=str(tmp_path / "g.json"))
+    g.add_entry(_entry("전사", "劍士"))
+    # 1 error in 2-char term = distance 1 = exactly at budget → matches
+    text1, pmap1 = g.protect("전시", SRC, TGT)
+    assert len(pmap1) == 1   # distance 1 == max_distance(1) → accepted
+    # Completely different 2-char term = distance 2 > budget → rejected
+    text2, pmap2 = g.protect("기도", SRC, TGT)
+    assert pmap2 == {}       # distance 2 > max_distance(1) for ≤3-char → rejected
+
+
+def test_protect_fuzzy_placeholder_not_contaminated(tmp_path):
+    """Pass 1 placeholders must not interfere with Pass 2 fuzzy scan."""
+    g = GlossaryService(path=str(tmp_path / "g.json"))
+    g.add_entry(_entry("아이템", "道具"))           # exact match
+    g.add_entry(_entry("듀얼 보우건", "雙弩槍"))    # will need fuzzy
+    text, pmap = g.protect("아이템 듀얼 보무건", SRC, TGT)
+    assert "道具" in pmap.values()      # exact matched
+    assert "雙弩槍" in pmap.values()    # fuzzy matched
+    assert len(pmap) == 2
+
+
+def test_protect_fuzzy_restore_roundtrip(tmp_path):
+    """Full roundtrip: fuzzy protect → dummy engine → restore."""
+    g = GlossaryService(path=str(tmp_path / "g.json"))
+    g.add_entry(_entry("소비아이템", "消耗品"))
+    # OCR error: 탬 instead of 템
+    protected, pmap = g.protect("소비아이탬 사용", SRC, TGT)
+    assert len(pmap) == 1
+    restored = g.restore(protected, pmap)
+    assert "消耗品" in restored
+
+
+def test_protect_fuzzy_two_char_errors(tmp_path):
+    """Real-world case: OCR produces 듀멀 보무건 (2 errors: 얼→멀, 우→무).
+    With max_distance=2 for >3-char terms this should now match."""
+    g = GlossaryService(path=str(tmp_path / "g.json"))
+    g.add_entry(_entry("듀얼 보우건", "雙弩槍"))
+    text, pmap = g.protect("듀멀 보무건", SRC, TGT)
+    assert len(pmap) == 1
+    assert "雙弩槍" in pmap.values()
+
+
+def test_protect_fuzzy_two_errors_in_longer_text(tmp_path):
+    """2 OCR errors in a 5-char term embedded in a longer sentence."""
+    g = GlossaryService(path=str(tmp_path / "g.json"))
+    g.add_entry(_entry("듀얼 보우건", "雙弩槍"))
+    g.add_entry(_entry("공격력", "攻擊力"))
+    g.add_entry(_entry("주문서", "捲軸"))
+    text, pmap = g.protect("듀멀 보무건 공격력 주문서", SRC, TGT)
+    assert "雙弩槍" in pmap.values()
+    assert "攻擊力" in pmap.values()
+    assert "捲軸" in pmap.values()

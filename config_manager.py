@@ -25,6 +25,13 @@ DEFAULT_CONFIG = {
     "community_glossary_seen_version": 0,  # last community glossary index version seen by user
     # Global hotkey (toggle pause from inside fullscreen games — pynput format)
     "hotkey_pause": "<ctrl>+<alt>+p",
+    # Glossary fuzzy-match thresholds (used in Pass 2 of GlossaryService.protect)
+    # Terms with length <= fuzzy_length_threshold use fuzzy_short_max_distance;
+    # longer terms use fuzzy_long_max_distance.  Set either distance to 0 to
+    # disable fuzzy matching for that class of terms.
+    "fuzzy_length_threshold":    3,  # char-count boundary between "short" and "long" terms
+    "fuzzy_short_max_distance":  1,  # max OCR errors allowed for short terms (≤ threshold)
+    "fuzzy_long_max_distance":   2,  # max OCR errors allowed for long terms  (> threshold)
 }
 
 def load_config():

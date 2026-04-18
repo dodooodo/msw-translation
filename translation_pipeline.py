@@ -197,9 +197,14 @@ class TranslationPipeline:
 
             # --- Glossary protection ---
             if self.glossary:
-                protected, gloss_pmap = self.glossary.protect(protected, source_lang, target_lang)
+                protected, gloss_pmap = self.glossary.protect(
+                    protected, source_lang, target_lang,
+                    fuzzy_length_threshold=self.config.get("fuzzy_length_threshold", 3),
+                    fuzzy_short_max_distance=self.config.get("fuzzy_short_max_distance", 1),
+                    fuzzy_long_max_distance=self.config.get("fuzzy_long_max_distance", 2),
+                )
                 pmap.update(gloss_pmap)
-                
+
             protected_texts.append(protected)
             placeholder_maps.append(pmap)
             ascii_maps.append(e_pmap)
@@ -213,16 +218,16 @@ class TranslationPipeline:
         # ---- Stage 3: Post-process + cache ----
         for raw_text, raw_result, pmap, e_pmap in zip(texts_to_translate, raw_results, placeholder_maps, ascii_maps):
             result = raw_result
-            
+
             # 1. Restore ASCII placeholders first (in case they contain glossary elements, though we ran ASCII protection first)
             for ph, original in e_pmap.items():
                 result = result.replace(ph, original)
-                
+
             # 2. Restore glossary placeholders
             if self.glossary:
                 result = self.glossary.restore(result, pmap)
                 result = self.glossary.correct(result, source_lang, target_lang)
-                
+
             # Store under the NORMALIZED key so minor OCR variations hit the same entry
             self._cache.put(self._normalize(raw_text), result)
 

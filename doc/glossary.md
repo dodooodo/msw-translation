@@ -44,6 +44,54 @@ intact because the engines treat them as punctuation rather than words.
 
 Patterns are compiled dynamically via `re.compile(re.escape(term))`. For 50 entries and 10 text blocks at 10 fps, overhead remains safely beneath ~500 µs via Python's internal Regex compile caching mechanisms.
 
+### Fuzzy fallback (Pass 2)
+
+After the exact regex pass, any glossary entries that did **not** match are
+retried with a fuzzy substring search. This handles OCR character confusion
+(e.g. Korean `무`↔`우`, `얼`↔`멀`) that would otherwise bypass glossary
+protection entirely.
+
+The fuzzy pass uses a **sliding window** over the text and **Levenshtein edit
+distance** (`rapidfuzz.distance.Levenshtein`) as the similarity metric.
+Tolerance is expressed as an absolute character-error budget controlled by
+three config fields:
+
+| Config field | Default | Description |
+|---|---|---|
+| `fuzzy_length_threshold` | `3` | Terms ≤ this many chars (space-stripped) use the short budget |
+| `fuzzy_short_max_distance` | `1` | Max OCR errors allowed for short terms |
+| `fuzzy_long_max_distance` | `2` | Max OCR errors allowed for long terms |
+
+Set either distance to `0` to disable fuzzy matching for that class of terms.
+
+Safety guards:
+- **Min term length = 2** — single-char terms are excluded (too many false positives).
+- **Min window size = 2** — prevents 1-char windows from producing spurious high scores.
+- **Placeholder contamination guard** — windows containing `__` (the shared marker for
+  `__T0__`, `__E0__` etc.) are skipped so Pass 1 substitutions cannot cause spurious
+  fuzzy matches in Pass 2.
+- **Spaces are stripped** before comparison so `"듀얼 보우건"` and `"듀얼보우건"` are equivalent.
+
+**Why Levenshtein distance instead of a ratio?**
+A ratio-based threshold (e.g. 75%) degrades for medium-length terms: a 5-char term
+with 2 errors scores only 60%, which would be rejected. Absolute edit distance
+grants a fixed error budget regardless of term length.
+
+Examples:
+```python
+g.add_entry(GlossaryEntry(terms={"Korean": "듀얼 보우건", "Traditional Chinese": "雙弩槍"}))
+
+# 1 OCR error (우→무) — distance 1 ≤ long_max_distance(2) → matched
+text, pmap = g.protect("듀얼 보무건", "Korean", "Traditional Chinese")
+# text = "__T0__"   pmap = {"__T0__": "雙弩槍"}
+
+# 2 OCR errors (얼→멀, 우→무) — distance 2 ≤ long_max_distance(2) → matched
+text, pmap = g.protect("듀멀 보무건", "Korean", "Traditional Chinese")
+# text = "__T0__"   pmap = {"__T0__": "雙弩槍"}
+
+# 3 OCR errors — distance 3 > long_max_distance(2) → rejected (safe)
+```
+
 ## restore()
 
 After translation, replaces each placeholder with its target term using
@@ -96,6 +144,9 @@ This means:
 - `"exact"` — matches the literal string (case-sensitive for CJK/Korean)
 - `"contains"` — same as exact currently; reserved for future substring matching
 - Regex support is planned for a future iteration
+
+Regardless of `match_mode`, all entries that fail the exact regex pass are
+automatically retried with the fuzzy fallback (see [Fuzzy fallback](#fuzzy-fallback-pass-2) above).
 
 ## CRUD API
 

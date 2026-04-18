@@ -179,19 +179,25 @@ packaged `.app` / `.exe` without any path changes at call sites.
 
 ### Glossary service (`glossary_service.py`)
 
-Manages user-defined term overrides. Data model treats entries as an i18n term dict mapping multiple languages simultaneously internally. 
+Manages user-defined term overrides. Data model treats entries as an i18n term dict
+mapping multiple languages simultaneously.
 
 **Two pipeline roles:**
 
-- `protect(text, src, tgt)` — replaces source terms with `__T0__`, `__T1__` …
-  before translation so the engine cannot mangle proper nouns.
+- `protect(text, src, tgt, *, fuzzy_length_threshold, fuzzy_short_max_distance, fuzzy_long_max_distance)`
+  — two-pass replacement of source terms with `__T0__`, `__T1__` … before translation:
+
+  - **Pass 1 (exact)** — `re.compile(re.escape(term))` match; fast, zero overhead for hits.
+  - **Pass 2 (fuzzy)** — sliding window + `rapidfuzz.distance.Levenshtein` for entries
+    that didn't match exactly. Error budget: `fuzzy_short_max_distance` for terms ≤
+    `fuzzy_length_threshold` chars (default 1 error), `fuzzy_long_max_distance` for longer
+    terms (default 2 errors). Skips windows containing `__` (placeholder contamination guard).
+
   Returns `(protected_text, {placeholder: target_term})`.
 
-- `restore(text, placeholder_map)` — replaces placeholders with target terms
-  after translation.
+- `restore(text, placeholder_map)` — replaces placeholders with target terms after translation.
 
-- `correct(text, src, tgt)` — fallback pass for any placeholders the engine
-  garbled or lost.
+- `correct(text, src, tgt)` — fallback pass for any placeholders the engine garbled or lost.
 
 Storage: `glossary.json` (JSON, human-readable, hand-editable).
 
@@ -337,7 +343,8 @@ emit result_ready(render_now)          ← fresh + state matches + ghosts
 
 [single consumer thread]  ← replaces stale pending job (drop-old)
     pipeline.translate_missing(missing_texts)
-        glossary.protect(text)
+        Pass 1: glossary.protect(text) — exact regex
+        Pass 2: glossary.protect(text) — fuzzy Levenshtein fallback
         engine_translate(protected_texts)
         glossary.restore(result)
         glossary.correct(result)
@@ -397,13 +404,13 @@ _result_row.show()
 Pure modules have no Qt or platform dependencies and can be tested without a display:
 
 ```bash
-uv run python -m pytest tests/ -v   # 132 tests, ~0.11 s
+uv run python -m pytest tests/ -v   # 142 tests, ~0.12 s
 ```
 
 | Test file | Module under test | Key scenarios |
 |-----------|-------------------|---------------|
 | `tests/test_lru_cache.py` | `LRUCache` | eviction order, access refresh, clear, fuzzy get_or_similar |
-| `tests/test_glossary_service.py` | `GlossaryService` | CRUD, protect/restore roundtrip, persistence |
+| `tests/test_glossary_service.py` | `GlossaryService` | CRUD, protect/restore roundtrip, fuzzy fallback (1 and 2 OCR errors), placeholder contamination, persistence |
 | `tests/test_translation_pipeline.py` | `TranslationPipeline` | cache warmup, clear_cache, glossary integration |
 | `tests/test_block_merger.py` | `merge_blocks_by_proximity` | merge conditions, threshold boundaries, bbox math |
 | `tests/test_config_manager.py` | `load_config` / `save_config` | defaults, key merging, malformed JSON fallback |

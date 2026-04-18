@@ -19,11 +19,18 @@ import os
 import re
 from dataclasses import dataclass, asdict, field
 
+from rapidfuzz import fuzz
+from rapidfuzz.distance import Levenshtein
+
 
 GLOSSARY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "glossary.json")
 
 # Placeholder format: unlikely to appear in natural text, preserved by most engines.
 _PLACEHOLDER_FMT = "__T{i}__"
+
+# Marker shared by all placeholder formats (__T0__, __E0__, etc.).
+# Used by _fuzzy_find_substring to skip already-replaced regions.
+_PLACEHOLDER_MARKER = "__"
 
 
 @dataclass
@@ -115,26 +122,65 @@ class GlossaryService:
     # ------------------------------------------------------------------
 
     def protect(
-        self, text: str, source_lang: str, target_lang: str
+        self, text: str, source_lang: str, target_lang: str,
+        *,
+        fuzzy_length_threshold: int = 3,
+        fuzzy_short_max_distance: int = 1,
+        fuzzy_long_max_distance: int = 2,
     ) -> tuple[str, dict[str, str]]:
         """
         Replace source terms with numbered placeholders.
         Returns (protected_text, {placeholder: target_term}).
         Call restore() on the translated output to substitute them back.
+
+        Two-pass strategy:
+          Pass 1 — exact regex matching (existing behaviour, fast path).
+          Pass 2 — fuzzy substring matching for entries that didn't match
+                   exactly, using a length-adaptive Levenshtein distance
+                   budget to tolerate OCR character confusion
+                   (e.g. 무↔우 in Korean).
+
+        Fuzzy parameters (all keyword-only, sourced from config):
+          fuzzy_length_threshold      — terms ≤ this many chars use the short budget
+          fuzzy_short_max_distance    — max edit distance for short terms
+          fuzzy_long_max_distance     — max edit distance for long terms
         """
         entries = self.get_entries(source_lang, target_lang)
         placeholder_map: dict[str, str] = {}
         i = 0
+
+        # ── Pass 1: exact matching (unchanged hot path) ──────────────
+        unmatched: list[GlossaryEntry] = []
         for entry in entries:
             src_term = entry.terms[source_lang]
             tgt_term = entry.terms[target_lang]
             ph = _PLACEHOLDER_FMT.format(i=i)
             pattern = self._build_pattern(src_term, entry.match_mode)
-            
+
             if pattern and pattern.search(text):
                 text = pattern.sub(ph, text)
                 placeholder_map[ph] = tgt_term
                 i += 1
+            else:
+                unmatched.append(entry)
+
+        # ── Pass 2: fuzzy fallback for OCR-confused text ─────────────
+        for entry in unmatched:
+            src_term = entry.terms[source_lang]
+            tgt_term = entry.terms[target_lang]
+            span = _fuzzy_find_substring(
+                text, src_term,
+                length_threshold=fuzzy_length_threshold,
+                short_max_distance=fuzzy_short_max_distance,
+                long_max_distance=fuzzy_long_max_distance,
+            )
+            if span is not None:
+                start, end = span
+                ph = _PLACEHOLDER_FMT.format(i=i)
+                text = text[:start] + ph + text[end:]
+                placeholder_map[ph] = tgt_term
+                i += 1
+
         return text, placeholder_map
 
     def restore(self, text: str, placeholder_map: dict[str, str]) -> str:
@@ -172,3 +218,71 @@ class GlossaryService:
         except re.error as e:
             print(f"[Glossary] 無效的 pattern '{term}': {e}")
         return None
+
+
+# --------------------------------------------------------------------------
+# Module-level fuzzy matching helper (used by GlossaryService.protect)
+# --------------------------------------------------------------------------
+
+def _fuzzy_find_substring(
+    text: str,
+    term: str,
+    *,
+    length_threshold: int = 3,
+    short_max_distance: int = 1,
+    long_max_distance: int = 2,
+) -> tuple[int, int] | None:
+    """Find the best fuzzy match of *term* within *text* using a sliding window.
+
+    Returns ``(start, end)`` of the matched span, or ``None``.
+
+    Uses absolute Levenshtein edit distance.  The distance budget is
+    determined by comparing the space-stripped term length against
+    *length_threshold*:
+
+    * ``term_len <= length_threshold`` → budget = *short_max_distance*
+    * ``term_len >  length_threshold`` → budget = *long_max_distance*
+
+    These three parameters are sourced from
+    ``config["fuzzy_length_threshold"]``, ``config["fuzzy_short_max_distance"]``,
+    and ``config["fuzzy_long_max_distance"]`` and forwarded by
+    ``GlossaryService.protect()``.
+
+    Placeholder contamination guard
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Windows that contain ``__`` (the marker shared by ``__T0__`` and
+    ``__E0__`` placeholders) are skipped so that prior replacements
+    from Pass 1 or the ASCII-auto-protect step cannot produce
+    spurious fuzzy matches.
+    """
+    term_nospace = term.replace(" ", "")
+    term_len = len(term_nospace)
+
+    if term_len < 2 or len(text) < term_len:
+        return None
+
+    # ── Select edit-distance budget from config ──────────────────────
+    max_distance = short_max_distance if term_len <= length_threshold else long_max_distance
+    if max_distance <= 0:
+        return None   # fuzzy matching disabled for this term class
+
+    best_distance = max_distance + 1   # sentinel: nothing found yet
+    best_span: tuple[int, int] | None = None
+
+    for window_size in range(max(2, term_len - 1), term_len + 2):
+        for i in range(len(text) - window_size + 1):
+            window = text[i : i + window_size]
+
+            # ── Placeholder contamination guard ───────────────────
+            if _PLACEHOLDER_MARKER in window:
+                continue
+
+            dist = Levenshtein.distance(
+                term_nospace, window.replace(" ", ""),
+                score_cutoff=max_distance,
+            )
+            if dist < best_distance:
+                best_distance = dist
+                best_span = (i, i + window_size)
+
+    return best_span if best_distance <= max_distance else None

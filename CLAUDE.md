@@ -27,12 +27,12 @@ ocr_model.py            OCRBlock dataclass — the single data type for the whol
 block_merger.py         merge_blocks_by_proximity — pure Python, no platform deps
 color_sampler.py        Pixel color sampling from CGImage — macOS only, no-op elsewhere
 translator_engine.py    Thread-safe LRUCache (+ fuzzy get_or_similar) + raw engine dispatch
-glossary_service.py     GlossaryEntry dataclass + CRUD + protect/restore/correct
+glossary_service.py     GlossaryEntry dataclass + CRUD + protect/restore/correct + fuzzy fallback
 translation_pipeline.py TranslationPipeline — pre-process → engine → post-process + cache
 community_glossary.py   GlossaryMeta dataclass + fetch_index() / fetch_glossary() via urllib
 language_descriptor.py  LanguageDescriptor dataclass — per-language flags (asian, use_space_remover, …)
 text_normalizer.py      normalize_ocr_text() — CJK/full-width punct → ASCII, whitespace collapse
-hotkey_listener.py      HotkeyListener(QObject) — global pause/resume hotkey via pynput
+hotkey_listener.py      HotkeyListener(QObject) — global pause/resume hotkey; NSEvent monitors on macOS, pynput on Windows/Linux
 
 capture/                Platform screenshot abstraction
   __init__.py             get_provider() factory
@@ -64,7 +64,7 @@ translator.spec         PyInstaller build spec (onedir + BUNDLE for macOS; onefi
 
 tests/                  pytest test suite (pure modules only — no Qt, no display needed)
   test_lru_cache.py           LRUCache eviction, access-order, fuzzy get_or_similar
-  test_glossary_service.py    CRUD, protect/restore roundtrip, persistence
+  test_glossary_service.py    CRUD, protect/restore roundtrip, fuzzy fallback, persistence
   test_translation_pipeline.py  Cache warmup, clear_cache, glossary integration
   test_block_merger.py        Merge conditions, threshold boundaries, bbox math
   test_config_manager.py      load/save defaults, key merging, malformed JSON fallback
@@ -105,6 +105,15 @@ doc/                    Developer documentation
   recent 64 entries (threshold: 95% Asian, 90% non-Asian) — jittery OCR still hits the
   cache without a re-translation. Cached value = fully post-processed final result (glossary
   applied). Call `pipeline.clear_cache()` when glossary entries change.
+
+- **Fuzzy glossary protect.** `GlossaryService.protect()` uses a two-pass strategy:
+  Pass 1 tries exact regex matching (fast path). Pass 2 retries unmatched entries
+  with a `rapidfuzz.distance.Levenshtein` sliding-window scan over the text. This
+  tolerates OCR character confusion (e.g. Korean `무`↔`우`, `얼`↔`멀`) that would
+  otherwise bypass glossary protection entirely. Absolute error budget: 1 char
+  for terms ≤3 chars, 2 chars for longer terms. A placeholder contamination guard
+  (`__` marker check) prevents Pass 1 substitutions from producing spurious
+  fuzzy matches in Pass 2.
 
 - **Platform isolation.** All macOS-specific code lives in `capture/mac.py`,
   `ocr/mac.py`, and `color_sampler.py`. Windows-specific code lives in
@@ -149,7 +158,10 @@ doc/                    Developer documentation
 | `merge_gap_ratio` | `0.8` | Vertical gap must be < avg\_height × this value to merge (`block_merger`) |
 | `merge_min_h_overlap` | `0.3` | Horizontal overlap must be ≥ this fraction of the narrower block's width (`block_merger`) |
 | `community_glossary_seen_version` | `0` | Last community glossary `index.json` version the user has seen; compared against remote on startup |
-| `hotkey_pause` | `"<ctrl>+<alt>+p"` | Global pause/resume hotkey (pynput format); registered by `HotkeyListener` in `AppController`; no-op when selector is showing |
+| `hotkey_pause` | `"<ctrl>+<alt>+p"` | Global pause/resume hotkey; pynput format (`<ctrl>+<alt>+p`); macOS uses NSEvent monitors, Windows/Linux use pynput; registered by `HotkeyListener` in `AppController`; no-op when selector is showing |
+| `fuzzy_length_threshold` | `3` | Terms with space-stripped length ≤ this value use `fuzzy_short_max_distance`; longer terms use `fuzzy_long_max_distance` |
+| `fuzzy_short_max_distance` | `1` | Max Levenshtein edit distance for short glossary terms during fuzzy protect Pass 2; set to `0` to disable for short terms |
+| `fuzzy_long_max_distance` | `2` | Max Levenshtein edit distance for long glossary terms during fuzzy protect Pass 2; set to `0` to disable for long terms |
 
 ## Running tests
 
@@ -157,7 +169,7 @@ doc/                    Developer documentation
 uv run python -m pytest tests/ -v
 ```
 
-All 132 tests cover 10 pure modules and run in ~0.11 s with no display.
+All 142 tests cover 10 pure modules and run in ~0.13 s with no display.
 The `dummy` engine (returns originals) is used in pipeline tests — no API key or network needed.
 Network calls in community_glossary tests are mocked with `unittest.mock.patch`.
 
@@ -183,7 +195,7 @@ automatically attached to the GitHub Release.
 - **Wrong bbox positions or bad merges** → `uv run bbox_visualizer.py`
 - **Wrong colors** → add `print` in `color_sampler._sample_block`, check `is_bgra` and `sx/sy`
 - **Translation not updating** → check `pipeline._cache` length; confirm `missing_texts` is non-empty
-- **Global hotkey not working** → macOS: Accessibility permission required (System Settings → Privacy → Accessibility); check `config["hotkey_pause"]` for valid pynput format (e.g. `"<ctrl>+<alt>+p"`); console prints `[hotkey] failed to register ...` on error
+- **Global hotkey not working** → macOS: uses Cocoa NSEvent monitors — requires Accessibility permission (System Settings → Privacy → Accessibility); check `config["hotkey_pause"]` syntax (`"<ctrl>+<alt>+p"`); console prints `[hotkey] ...` on error. Windows/Linux: pynput must be installed (`uv sync`)
 - **Platform import errors** → check `sys.platform` value; macOS = `"darwin"`, Windows = `"win32"`
 - **Windows OCR errors** → confirm `winrt-Windows.Media.Ocr` is installed; check language pack availability
 - **Windows translation errors** → requires Win 11 24H2+; falls back to originals on older builds

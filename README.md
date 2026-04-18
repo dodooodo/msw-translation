@@ -123,8 +123,9 @@ To share your own glossary:
 
 **How it works:**
 1. Before translation — source terms are replaced with `__T0__` placeholders
-2. After translation — placeholders are swapped back to target terms
-3. Correction pass — any entries the engine garbled are fixed by string replacement
+2. **Fuzzy fallback** — any unmatched entries are retried with a sliding window substring search using Levenshtein distance. This tolerates OCR character confusion (e.g. `우`↔`무`).
+3. After translation — placeholders are swapped back to target terms
+4. Correction pass — any entries the engine garbled are fixed by string replacement
 
 ---
 
@@ -179,9 +180,22 @@ Ticks to ghost-render a block after OCR miss (~0.6 s at default interval).
 Global keyboard shortcut to pause/resume OCR from inside a fullscreen game — no
 alt-tab required. Uses pynput format: modifier keys in angle brackets
 (`<ctrl>`, `<alt>`, `<shift>`, `<cmd>`), regular keys bare (`p`, `f9`, etc.).
+On macOS the hotkey is implemented via Cocoa NSEvent monitors; on Windows/Linux via pynput.
 
-> **macOS note:** pynput requires Accessibility permission.
-> System Settings → Privacy & Security → Accessibility → grant permission to the app.
+### `fuzzy_length_threshold` (default: `3`)
+Char-count boundary (space-stripped) between "short" and "long" terms for the fuzzy matcher.
+
+### `fuzzy_short_max_distance` (default: `1`)
+Max absolute Levenshtein edit distance (OCR errors) allowed for short terms. Set to `0` to disable.
+
+### `fuzzy_long_max_distance` (default: `2`)
+Max absolute Levenshtein edit distance (OCR errors) allowed for long terms. Set to `0` to disable.
+
+> **Why distance instead of a ratio?**
+> A ratio threshold (e.g. 75%) rejects many medium-length terms (a 5-char term with 2 errors has only a 60% ratio). Absolute distance allows for a predictable error budget.
+
+> **macOS note:** requires Accessibility permission (System Settings → Privacy & Security → Accessibility).
+> macOS uses Cocoa NSEvent monitors (not pynput) so Caps Lock and other modifier keys cannot crash the app.
 > This is the same permission already needed for Quartz screen capture.
 
 ---
@@ -222,7 +236,7 @@ translation_pipeline.py Full pre→translate→post pipeline
 community_glossary.py   Community glossary fetch (GitHub)
 language_descriptor.py  Per-language flags (asian, space-remover, …)
 text_normalizer.py      CJK punctuation normalizer for cache keys
-hotkey_listener.py      Global pause hotkey bridge (pynput → Qt signal)
+hotkey_listener.py      Global pause hotkey (NSEvent on macOS, pynput on Win/Linux → Qt signal)
 
 capture/                Platform screenshot abstraction
   mac.py                  Quartz (macOS)
