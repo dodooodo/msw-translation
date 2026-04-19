@@ -25,7 +25,11 @@ import re
 import unicodedata
 
 from translator_engine import LRUCache, engine_translate
-from glossary_service  import GlossaryService
+from glossary_service  import (
+    GlossaryService,
+    cleanup_placeholder_fragments,
+    restore_placeholder_variants,
+)
 from language_descriptor import get as get_language
 from text_normalizer    import normalize_ocr_text
 
@@ -186,7 +190,7 @@ class TranslationPipeline:
                     start, end = match.span()
                     new_protected += protected[last_end:start]
                     
-                    ph = f"__E{e_index}__"
+                    ph = f"[[E{e_index}]]"
                     e_index += 1
                     e_pmap[ph] = match.group(0)
                     new_protected += ph
@@ -220,13 +224,15 @@ class TranslationPipeline:
             result = raw_result
 
             # 1. Restore ASCII placeholders first (in case they contain glossary elements, though we ran ASCII protection first)
-            for ph, original in e_pmap.items():
-                result = result.replace(ph, original)
+            result = restore_placeholder_variants(result, e_pmap)
 
             # 2. Restore glossary placeholders
             if self.glossary:
                 result = self.glossary.restore(result, pmap)
                 result = self.glossary.correct(result, source_lang, target_lang)
+
+            # 3. Clean up any remaining bracketed placeholder fragments before caching/UI
+            result = cleanup_placeholder_fragments(result, pmap, e_pmap)
 
             # Store under the NORMALIZED key so minor OCR variations hit the same entry
             self._cache.put(self._normalize(raw_text), result)

@@ -131,3 +131,31 @@ def test_set_glossary_clears_cache(dummy_config):
     assert p.is_cached("text")
     p.set_glossary(None)
     assert not p.is_cached("text")
+
+
+def test_pipeline_restores_single_bracket_placeholder_variant(dummy_config, glossary, monkeypatch):
+    glossary.add_entry(GlossaryEntry(
+        terms={SRC: "스타포스", TGT: "星之力"}
+    ))
+    p = TranslationPipeline(dummy_config, glossary=glossary)
+
+    def fake_engine_translate(_texts, _config):
+        return ["캐릭터 [T0] 강화"]
+
+    monkeypatch.setattr("translation_pipeline.engine_translate", fake_engine_translate)
+    p.translate_missing(["캐릭터 스타포스 강화"])
+    assert p.get_cached("캐릭터 스타포스 강화") == "캐릭터 星之力 강화"
+
+
+def test_pipeline_does_not_restore_bare_placeholder_token(dummy_config, glossary, monkeypatch):
+    glossary.add_entry(GlossaryEntry(
+        terms={SRC: "스타포스", TGT: "星之力"}
+    ))
+    p = TranslationPipeline(dummy_config, glossary=glossary)
+
+    def fake_engine_translate(_texts, _config):
+        return ["캐릭터 T0 강화"]
+
+    monkeypatch.setattr("translation_pipeline.engine_translate", fake_engine_translate)
+    p.translate_missing(["캐릭터 스타포스 강화"])
+    assert p.get_cached("캐릭터 스타포스 강화") == "캐릭터 T0 강화"

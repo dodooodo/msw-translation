@@ -26,11 +26,16 @@ from rapidfuzz.distance import Levenshtein
 GLOSSARY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "glossary.json")
 
 # Placeholder format: unlikely to appear in natural text, preserved by most engines.
-_PLACEHOLDER_FMT = "__T{i}__"
+_PLACEHOLDER_FMT = "[[T{i}]]"
 
-# Marker shared by all placeholder formats (__T0__, __E0__, etc.).
+# Marker shared by all placeholder formats ([[T0]], [[E0]], etc.).
 # Used by _fuzzy_find_substring to skip already-replaced regions.
-_PLACEHOLDER_MARKER = "__"
+_PLACEHOLDER_MARKER = "[["
+
+_PLACEHOLDER_RE = re.compile(r"^\[\[([A-Z])(\d+)\]\]$")
+_UNKNOWN_PLACEHOLDER_FRAGMENT_RE = re.compile(
+    r"\[\[\s*[A-Z]\s*\d+\s*\]\]|\[\s*[A-Z]\s*\d+\s*\]"
+)
 
 
 @dataclass
@@ -185,9 +190,7 @@ class GlossaryService:
 
     def restore(self, text: str, placeholder_map: dict[str, str]) -> str:
         """Replace placeholders produced by protect() with their target terms."""
-        for ph, target_term in placeholder_map.items():
-            text = text.replace(ph, target_term)
-        return text
+        return restore_placeholder_variants(text, placeholder_map)
 
     def correct(self, text: str, source_lang: str, target_lang: str) -> str:
         """
@@ -250,8 +253,8 @@ def _fuzzy_find_substring(
 
     Placeholder contamination guard
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    Windows that contain ``__`` (the marker shared by ``__T0__`` and
-    ``__E0__`` placeholders) are skipped so that prior replacements
+    Windows that contain ``[[`` (the marker shared by ``[[T0]]`` and
+    ``[[E0]]`` placeholders) are skipped so that prior replacements
     from Pass 1 or the ASCII-auto-protect step cannot produce
     spurious fuzzy matches.
     """
@@ -286,3 +289,52 @@ def _fuzzy_find_substring(
                 best_span = (i, i + window_size)
 
     return best_span if best_distance <= max_distance else None
+
+
+def restore_placeholder_variants(text: str, placeholder_map: dict[str, str]) -> str:
+    """Restore exact placeholders and supported bracket-preserving variants."""
+    items: list[tuple[str, str, int]] = []
+    for ph, replacement in placeholder_map.items():
+        parsed = _parse_placeholder_id(ph)
+        if parsed is None:
+            continue
+        kind, idx = parsed
+        items.append((kind, replacement, idx))
+
+    for kind, replacement, idx in sorted(items, key=lambda item: len(str(item[2])), reverse=True):
+        exact = _PLACEHOLDER_FMT.replace("T", kind).format(i=idx)
+        text = text.replace(exact, replacement)
+        for pattern in _build_placeholder_variant_patterns(kind, idx):
+            text = pattern.sub(replacement, text)
+    return text
+
+
+def cleanup_placeholder_fragments(
+    text: str,
+    placeholder_map: dict[str, str],
+    ascii_map: dict[str, str],
+) -> str:
+    """Restore known bracketed fragments, then remove unknown bracketed remnants."""
+    combined = dict(placeholder_map)
+    combined.update(ascii_map)
+    text = restore_placeholder_variants(text, combined)
+    return _UNKNOWN_PLACEHOLDER_FRAGMENT_RE.sub("", text)
+
+
+def _parse_placeholder_id(placeholder: str) -> tuple[str, int] | None:
+    match = _PLACEHOLDER_RE.match(placeholder)
+    if not match:
+        return None
+    kind, idx = match.groups()
+    return kind, int(idx)
+
+
+def _build_placeholder_variant_patterns(kind: str, idx: int) -> list[re.Pattern]:
+    token = f"{kind}{idx}"
+    spaced = f"{kind} {idx}"
+    return [
+        re.compile(rf"(?<![A-Za-z0-9])\[\[\s*{re.escape(token)}\s*\]\](?![A-Za-z0-9])"),
+        re.compile(rf"(?<![A-Za-z0-9])\[\[\s*{re.escape(spaced)}\s*\]\](?![A-Za-z0-9])"),
+        re.compile(rf"(?<![A-Za-z0-9])\[\s*{re.escape(token)}\s*\](?![A-Za-z0-9])"),
+        re.compile(rf"(?<![A-Za-z0-9])\[\s*{re.escape(spaced)}\s*\](?![A-Za-z0-9])"),
+    ]

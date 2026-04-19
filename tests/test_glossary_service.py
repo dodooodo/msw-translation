@@ -4,7 +4,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import json
 import pytest
-from glossary_service import GlossaryService, GlossaryEntry
+from glossary_service import (
+    GlossaryService,
+    GlossaryEntry,
+    cleanup_placeholder_fragments,
+)
 
 SRC = "Korean"
 TGT = "Traditional Chinese"
@@ -87,8 +91,8 @@ def test_protect_single_term(tmp_path):
     g.add_entry(_entry("스타포스", "星之力"))
     text, pmap = g.protect("캐릭터 스타포스 강화", SRC, TGT)
     assert "스타포스" not in text
-    assert "__T0__" in text
-    assert pmap["__T0__"] == "星之力"
+    assert "[[T0]]" in text
+    assert pmap["[[T0]]"] == "星之力"
 
 
 def test_protect_multiple_terms(tmp_path):
@@ -111,8 +115,44 @@ def test_protect_no_match(tmp_path):
 
 def test_restore(tmp_path):
     g = GlossaryService(path=str(tmp_path / "g.json"))
-    result = g.restore("캐릭터 __T0__ 강화", {"__T0__": "星之力"})
+    result = g.restore("캐릭터 [[T0]] 강화", {"[[T0]]": "星之力"})
     assert result == "캐릭터 星之力 강화"
+
+
+def test_restore_accepts_single_bracket_variant(tmp_path):
+    g = GlossaryService(path=str(tmp_path / "g.json"))
+    result = g.restore("캐릭터 [T0] 강화", {"[[T0]]": "星之力"})
+    assert result == "캐릭터 星之力 강화"
+
+
+def test_restore_accepts_spaced_bracket_variant(tmp_path):
+    g = GlossaryService(path=str(tmp_path / "g.json"))
+    result = g.restore("캐릭터 [[ T0 ]] 강화", {"[[T0]]": "星之力"})
+    assert result == "캐릭터 星之力 강화"
+
+
+def test_restore_accepts_spaced_index_inside_brackets(tmp_path):
+    g = GlossaryService(path=str(tmp_path / "g.json"))
+    result = g.restore("캐릭터 [T 0] 강화", {"[[T0]]": "星之力"})
+    assert result == "캐릭터 星之力 강화"
+
+
+def test_restore_does_not_accept_bare_token(tmp_path):
+    g = GlossaryService(path=str(tmp_path / "g.json"))
+    result = g.restore("캐릭터 T0 강화", {"[[T0]]": "星之力"})
+    assert result == "캐릭터 T0 강화"
+
+
+def test_restore_does_not_accept_spaced_bare_token(tmp_path):
+    g = GlossaryService(path=str(tmp_path / "g.json"))
+    result = g.restore("캐릭터 T 0 강화", {"[[T0]]": "星之力"})
+    assert result == "캐릭터 T 0 강화"
+
+
+def test_restore_does_not_match_inside_alnum_word(tmp_path):
+    g = GlossaryService(path=str(tmp_path / "g.json"))
+    result = g.restore("AT0B [T0]", {"[[T0]]": "星之力"})
+    assert result == "AT0B 星之力"
 
 
 def test_protect_restore_roundtrip(tmp_path):
@@ -172,7 +212,7 @@ def test_protect_exact_preferred_over_fuzzy(tmp_path):
     g.add_entry(_entry("스타포스", "星之力"))
     text, pmap = g.protect("스타포스 강화", SRC, TGT)
     assert len(pmap) == 1
-    assert "__T0__" in text
+    assert "[[T0]]" in text
 
 
 def test_protect_fuzzy_threshold_boundary(tmp_path):
@@ -197,6 +237,24 @@ def test_protect_fuzzy_placeholder_not_contaminated(tmp_path):
     assert "道具" in pmap.values()      # exact matched
     assert "雙弩槍" in pmap.values()    # fuzzy matched
     assert len(pmap) == 2
+
+
+def test_cleanup_placeholder_fragments_restores_known_bracketed_tokens():
+    cleaned = cleanup_placeholder_fragments(
+        "前綴 [T0] 與 [E0] 後綴",
+        {"[[T0]]": "星之力"},
+        {"[[E0]]": "ALICIA"},
+    )
+    assert cleaned == "前綴 星之力 與 ALICIA 後綴"
+
+
+def test_cleanup_placeholder_fragments_removes_unknown_bracketed_tokens():
+    cleaned = cleanup_placeholder_fragments(
+        "前綴 [T9] 後綴",
+        {"[[T0]]": "星之力"},
+        {},
+    )
+    assert cleaned == "前綴  後綴"
 
 
 def test_protect_fuzzy_restore_roundtrip(tmp_path):
