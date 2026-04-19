@@ -37,9 +37,10 @@ hotkey_listener.py      HotkeyListener(QObject) — global pause/resume hotkey; 
 
 capture/                Platform screenshot abstraction
   __init__.py             get_provider() factory
-  base.py                 CaptureProvider ABC
-  mac.py                  Quartz CGWindowListCreateImage (macOS)
+  base.py                 CaptureProvider ABC — grab(roi, below_win_id, game_win_id)
+  mac.py                  Quartz CGWindowListCreateImage / CGWindowListCreateImageFromArray (macOS)
   cross.py                mss-based fallback (Windows / Linux)
+  window_finder.py        find_window_client_rect() + find_game_window_id() — auto-detect game window
 
 ocr/                    Platform OCR abstraction
   __init__.py             get_provider() factory + OCR_LANG_MAP constant
@@ -128,6 +129,22 @@ doc/                    Developer documentation
   (`T0`, `T 0`). A final bracketed-fragment cleanup pass in `translation_pipeline.py`
   recovers or removes any residual `[[T`/`[[E` fragments before the result is cached.
 
+- **Game-window auto-detection.** `AppController.show_selector()` calls
+  `find_window_client_rect("MapleStory Worlds")` before showing the snipping tool.
+  If found, the overlay launches immediately with the game window's client area as ROI
+  (title bar excluded: 28 px macOS / `GetClientRect` Windows). Falls back to manual
+  selection if the game is not running.
+
+- **Game-window-specific capture.** `OCRWorker` stores `game_win_id` (macOS CGWindowID).
+  `MacCaptureProvider.grab()` uses `CGWindowListCreateImageFromArray([game_win_id], rect)`
+  when this is set, reading directly from the window server backing store — works even when
+  other windows cover the game. `grab()` signature: `(roi, below_win_id, game_win_id)`.
+
+- **Overlay window level.** `_sync_level_with_game(ns_window, game_win_id)` (called in
+  `showEvent`) sets the overlay's NSWindow level to `game_level + 1` via Quartz +
+  `setLevel_()`. The overlay is always above the game but below floating panels (3) and
+  system UI — so windows that cover the game also cover the translations.
+
 - **Platform isolation.** All macOS-specific code lives in `capture/mac.py`,
   `ocr/mac.py`, and `color_sampler.py`. Windows-specific code lives in
   `ocr/windows.py` and `translate_windows.cs`. Swapping providers requires
@@ -183,7 +200,7 @@ doc/                    Developer documentation
 uv run python -m pytest tests/ -v
 ```
 
-All 149 tests cover 11 pure modules and run in ~0.13 s with no display.
+All 159 tests cover 11 pure modules and run in ~0.13 s with no display.
 The `dummy` engine (returns originals) is used in pipeline tests — no API key or network needed.
 Network calls in community_glossary tests are mocked with `unittest.mock.patch`.
 

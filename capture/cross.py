@@ -5,9 +5,10 @@ from capture.base import CaptureProvider
 
 class MssCaptureProvider(CaptureProvider):
     def grab(self, roi: tuple[int, int, int, int],
-             below_win_id: int | None = None):
+             below_win_id: int | None = None,
+             _game_win_id: int | None = None):
         """
-        below_win_id is ignored on non-macOS platforms (no equivalent API).
+        below_win_id and game_win_id are ignored on non-macOS platforms.
         Returns an mss screenshot object with a .rgb / .raw attribute.
         """
         try:

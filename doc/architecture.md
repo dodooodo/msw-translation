@@ -64,6 +64,23 @@ The image format is opaque to callers other than the matching OCR provider.
 | `MacCaptureProvider` | `CGImageRef` | macOS |
 | `MssCaptureProvider` | `mss.ScreenShot` | Windows / Linux |
 
+`grab(roi, below_win_id, game_win_id)` has three capture modes (priority order):
+
+1. **`game_win_id` set** — `CGWindowListCreateImageFromArray([game_win_id], rect, ...)`:
+   reads directly from the window server backing store of the specified window.
+   Works even when the game is fully covered by other windows.
+2. **`below_win_id` set** — `kCGWindowListOptionOnScreenBelowWindow`: captures all
+   pixels below the overlay, preventing the translated text from being re-OCR'd.
+3. **Neither** — `kCGWindowListOptionOnScreenOnly`: plain screen capture.
+
+`window_finder.py` provides two helpers called at overlay startup:
+
+- `find_window_client_rect(title)` — returns `(x, y, w, h)` of the client area
+  (title bar excluded). macOS: two-pass — osascript Accessibility API first, then
+  Quartz `CGWindowListOptionAll` fallback (needed for Metal/OpenGL games). Windows:
+  `FindWindowW` + `GetClientRect` + `ClientToScreen` via ctypes. Linux: xdotool subprocess.
+- `find_game_window_id(title)` — returns the macOS CGWindowID for use with `grab()`.
+
 ### OCR providers
 
 | Provider | Input | Platform |
@@ -76,9 +93,10 @@ The image format is opaque to callers other than the matching OCR provider.
 async OCR API synchronously from the worker thread. The mss screenshot is converted to
 a `SoftwareBitmap` (Bgra8) via PIL + `InMemoryRandomAccessStream` + `BitmapDecoder`.
 
-`below_win_id` (macOS only): when the overlay's NSWindow number is passed,
-`CGWindowListCreateImage` captures only windows beneath the overlay — so the
-translated text is never captured and re-translated.
+`game_win_id` (macOS only): when set, `CGWindowListCreateImageFromArray` targets
+the game window's backing store directly — works even when the game is occluded.
+`below_win_id` (macOS only): fallback mode; captures only windows beneath the overlay
+so the translated text is never re-OCR'd.
 
 ### OCR layer (`ocr/`)
 
@@ -312,6 +330,10 @@ hints, biasing the OCR engine toward known game vocabulary and reducing variance
 - `drawText` with `TextSingleLine` — prevents QPainter word-wrap
 - `NSWindow.setHasShadow_(False)` via PyObjC in `showEvent` — eliminates macOS compositor shadow
 - Font size = `max(10, int(bbox_height * 0.85))`
+- `_sync_level_with_game(ns_window, game_win_id)` — called in `showEvent`; queries the
+  game window's `kCGWindowLayer` via Quartz and sets `ns_window.setLevel_(game_level + 1)`.
+  The overlay is one level above the game (never behind it) but below floating panels (3),
+  modal dialogs (8), and system UI — so other apps that cover the game also cover the overlay.
 
 **Edit mode:**
 - `ControlWindow` emits `mode_changed("edit")` when the ⊕ button is pressed.
@@ -329,8 +351,9 @@ hints, biasing the OCR engine toward known game vocabulary and reducing variance
 ## Data flow (detailed)
 
 ```
-capture.grab(roi, below_win_id)
+capture.grab(roi, below_win_id, game_win_id)
     → CGImageRef / mss.ScreenShot
+    (macOS: game_win_id → CGWindowListCreateImageFromArray; ignores occlusion)
 
 ocr.recognize(image, roi_w, roi_h, languages, custom_words)
     → list[OCRBlock]  (text, bbox, conf; colors at defaults)
@@ -425,7 +448,7 @@ _result_row.show()
 Pure modules have no Qt or platform dependencies and can be tested without a display:
 
 ```bash
-uv run python -m pytest tests/ -v   # 149 tests, ~0.12 s
+uv run python -m pytest tests/ -v   # 159 tests, ~0.12 s
 ```
 
 | Test file | Module under test | Key scenarios |

@@ -45,9 +45,12 @@ uv resolves and installs all dependencies automatically.
 
 ## Usage
 
-1. Drag to select the game text area
-2. Click **✅ 確認並開始翻譯** to start
-3. Translated text appears as an overlay in real time
+1. Launch the app — if **MapleStory Worlds** is already running the game window
+   is detected automatically and the overlay starts immediately (no manual selection needed)
+2. If the game is not running, drag to select the game text area manually, then
+   click **✅ 確認並開始翻譯** to start
+3. Translated text appears as an overlay in real time, at the same window level
+   as the game — other windows that cover the game will also cover the translations
 4. Click **⏸ 暫停** (or press `Ctrl+Alt+P` globally) to freeze / clear the display
 5. Click **⏹️ 退出並重新截圖** to re-select the area
 
@@ -249,8 +252,9 @@ tracking_utils.py       Pure bbox tracking helpers for same-track / occlusion de
 hotkey_listener.py      Global pause hotkey (NSEvent on macOS, pynput on Win/Linux → Qt signal)
 
 capture/                Platform screenshot abstraction
-  mac.py                  Quartz (macOS)
+  mac.py                  Quartz (macOS); game-window-specific capture via CGWindowListCreateImageFromArray
   cross.py                mss (Windows / Linux)
+  window_finder.py        Auto-detect game window bounds and CGWindowID (macOS/Windows/Linux)
 ocr/                    Platform OCR abstraction
   mac.py                  Apple Vision (macOS)
   windows.py              Windows.Media.Ocr (Windows)

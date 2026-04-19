@@ -68,6 +68,7 @@ class OCRWorker(QThread):
         self._latest_seen_lock: threading.Lock  = threading.Lock()
         self._custom_words: list[str]           = self._build_custom_words()
         self.overlay_win_id: int | None = None
+        self.game_win_id:    int | None = None
 
         # ── Single-thread translation queue (drop-old strategy) ────────
         # Only one translation thread is ever alive.  When a new OCR tick
@@ -137,7 +138,7 @@ class OCRWorker(QThread):
             interval = self.config.get("ocr_interval", 1.0)
 
             # ---- Capture ----
-            image = self._capture.grab(self.roi, self.overlay_win_id)
+            image = self._capture.grab(self.roi, self.overlay_win_id, self.game_win_id)
 
             # ---- Frame-diff skip: reuse last tick if pixels are identical ----
             fp = self._capture.fingerprint(image)
@@ -323,6 +324,7 @@ class RawOCRWorker(QThread):
         self.config         = config
         self.running        = True
         self.overlay_win_id: int | None = None
+        self.game_win_id:    int | None = None
         self._capture       = capture.get_provider()
         self._ocr           = ocr.get_provider()
         self._languages     = ocr.OCR_LANG_MAP.get(
@@ -332,7 +334,7 @@ class RawOCRWorker(QThread):
     def run(self) -> None:
         while self.running:
             interval = self.config.get("ocr_interval", 1.0)
-            image    = self._capture.grab(self.roi, self.overlay_win_id)
+            image    = self._capture.grab(self.roi, self.overlay_win_id, self.game_win_id)
             blocks   = self._ocr.recognize(image, self.roi[2], self.roi[3],
                                            self._languages)
             merged   = merge_blocks_by_proximity(
@@ -652,6 +654,25 @@ class EditPopup(QWidget):
 # Step 2 — Translation overlay (QPainter)
 # ---------------------------------------------------------------------------
 
+def _sync_level_with_game(ns_window, game_win_id: int | None) -> None:
+    """Set ns_window's level to match the game window's CGWindowLayer.
+    This lets normal windows that cover the game also cover the overlay."""
+    if game_win_id is None:
+        return
+    try:
+        import Quartz
+        wins = Quartz.CGWindowListCopyWindowInfo(
+            Quartz.kCGWindowListOptionAll, Quartz.kCGNullWindowID
+        )
+        for w in wins:
+            if w.get(Quartz.kCGWindowNumber) == game_win_id:
+                game_level = w.get(Quartz.kCGWindowLayer, 0)
+                ns_window.setLevel_(game_level + 1)
+                break
+    except Exception:
+        pass
+
+
 class TranslatorOverlay(QMainWindow):
     def __init__(self, roi: tuple, pipeline: TranslationPipeline):
         super().__init__()
@@ -670,7 +691,6 @@ class TranslatorOverlay(QMainWindow):
 
     def _init_ui(self) -> None:
         self.setWindowFlags(
-            Qt.WindowType.WindowStaysOnTopHint |
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowTransparentForInput
         )
@@ -688,6 +708,10 @@ class TranslatorOverlay(QMainWindow):
             if ns_window:
                 ns_window.setHasShadow_(False)
                 self.ocr_worker.overlay_win_id = ns_window.windowNumber()
+                from capture.window_finder import find_game_window_id
+                game_win_id = find_game_window_id("MapleStory Worlds")
+                self.ocr_worker.game_win_id = game_win_id
+                _sync_level_with_game(ns_window, game_win_id)
         except Exception as e:
             print(f"[Overlay] 無法取得 NSWindow: {e}")
 
@@ -840,7 +864,6 @@ class BBoxOverlay(QMainWindow):
         self.blocks: list[OCRBlock] = []
 
         self.setWindowFlags(
-            Qt.WindowType.WindowStaysOnTopHint |
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowTransparentForInput
         )
@@ -862,6 +885,10 @@ class BBoxOverlay(QMainWindow):
             if ns_window:
                 ns_window.setHasShadow_(False)
                 self.worker.overlay_win_id = ns_window.windowNumber()
+                from capture.window_finder import find_game_window_id
+                game_win_id = find_game_window_id("MapleStory Worlds")
+                self.worker.game_win_id = game_win_id
+                _sync_level_with_game(ns_window, game_win_id)
         except Exception:
             pass
 
@@ -1555,6 +1582,15 @@ class AppController:
         if self.control:
             self.control.close()
             self.control = None
+
+        from capture.window_finder import find_window_client_rect
+        rect = find_window_client_rect("MapleStory Worlds")
+        if rect is not None:
+            print(f"[AutoDetect] MapleStory Worlds: {rect}")
+            self._config["last_roi"] = list(rect)
+            save_config(self._config)
+            self.launch_overlay(rect)
+            return
 
         self.selector = SnippingToolWindow(
             self._config, glossary=self._glossary, pipeline=self._pipeline
