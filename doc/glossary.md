@@ -42,6 +42,12 @@ text, pmap = glossary.protect("캐릭터 스타포스 강화", "Korean", "Tradit
 Placeholder format: `[[T{n}]]`. Double brackets are visually distinct and survive
 most translation engines without being treated as ordinary words.
 
+**Match order — longest first.** `_entries` is kept sorted by the longest term
+length across all languages (descending) whenever entries are loaded, added, or
+replaced. This guarantees that a compound term like `건 공격력 주문서` is protected
+before its constituent sub-terms (`공격력`, `주문서`) can consume parts of the text
+and leave the compound unmatched.
+
 Patterns are compiled dynamically via `re.compile(re.escape(term))`. For 50 entries and 10 text blocks at 10 fps, overhead remains safely beneath ~500 µs via Python's internal Regex compile caching mechanisms.
 
 ### Fuzzy fallback (Pass 2)
@@ -171,7 +177,7 @@ entries = g.get_entries("Korean", "Traditional Chinese")
 g.remove_entry_by_term("스타포스", "Korean")
 ```
 
-`add_entry` appends the entry. Use `set_all_entries` for bulk resetting from UI.
+`add_entry` appends and re-sorts. Use `set_all_entries` for bulk resetting from UI.
 All mutations call `save()` automatically.
 
 ## Glossary settings UI

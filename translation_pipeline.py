@@ -177,7 +177,7 @@ class TranslationPipeline:
 
             texts_to_translate.append(text)
             
-            protected = text
+            protected = unicodedata.normalize("NFC", text)
             pmap = {}
             e_pmap = {}
             

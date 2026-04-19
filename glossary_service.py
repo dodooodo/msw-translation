@@ -81,6 +81,7 @@ class GlossaryService:
                     loaded_entries.append(GlossaryEntry(**e))
                     
             self._entries = loaded_entries
+            self._sort_entries()
         except Exception as e:
             print(f"[Glossary] 載入失敗: {e}")
             self._entries = []
@@ -110,17 +111,25 @@ class GlossaryService:
     def set_all_entries(self, entries: list[GlossaryEntry]) -> None:
         """Replace the entire glossary, useful for bulk UI updates."""
         self._entries = entries
+        self._sort_entries()
         self.save()
 
     def add_entry(self, entry: GlossaryEntry) -> None:
         """Add a single entry."""
         self._entries.append(entry)
+        self._sort_entries()
         self.save()
 
     def remove_entry_by_term(self, term: str, lang: str) -> None:
         """Remove any entry having the precise term for the specified language."""
         self._entries = [e for e in self._entries if e.terms.get(lang) != term]
         self.save()
+
+    def _sort_entries(self) -> None:
+        self._entries.sort(
+            key=lambda e: max((len(v) for v in e.terms.values()), default=0),
+            reverse=True,
+        )
 
     # ------------------------------------------------------------------
     # Pipeline operations

@@ -117,7 +117,10 @@ doc/                    Developer documentation
   otherwise bypass glossary protection entirely. Absolute error budget: 1 char
   for terms ≤3 chars, 2 chars for longer terms. A placeholder contamination guard
   (`[[` marker check) prevents Pass 1 substitutions from producing spurious
-  fuzzy matches in Pass 2.
+  fuzzy matches in Pass 2. Entries are pre-sorted longest-first (by max term
+  length across all languages) on load / add / set_all, so compound terms like
+  `건 공격력 주문서` are matched before constituent sub-terms (`공격력`, `주문서`)
+  can consume parts of the text.
 
 - **Placeholder format.** Glossary placeholders use `[[T{i}]]`; ASCII auto-protect
   uses `[[E{i}]]`. `restore()` also accepts bracket-variant deformations produced by
