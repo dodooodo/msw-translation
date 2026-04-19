@@ -58,7 +58,7 @@ engine_rev_map = {0: "dummy", 1: "apple", 2: "windows", 3: "google", 4: "myengin
 ## Rules
 
 - `engine_translate` receives the **protected text** (glossary placeholders
-  already inserted). Do not strip or modify `__T0__`-style tokens.
+  already inserted). Do not strip or modify `[[T0]]`-style tokens.
 - Always return a list of exactly `len(texts)` strings.
 - On failure, return the originals — never raise an exception out of the function.
 - The function is called from a background daemon thread; blocking I/O is fine.

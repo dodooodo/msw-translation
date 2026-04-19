@@ -122,7 +122,7 @@ To share your own glossary:
 ```
 
 **How it works:**
-1. Before translation — source terms are replaced with `__T0__` placeholders
+1. Before translation — source terms are replaced with `[[T0]]` placeholders
 2. **Fuzzy fallback** — any unmatched entries are retried with a sliding window substring search using Levenshtein distance. This tolerates OCR character confusion (e.g. `우`↔`무`).
 3. After translation — placeholders are swapped back to target terms
 4. Correction pass — any entries the engine garbled are fixed by string replacement

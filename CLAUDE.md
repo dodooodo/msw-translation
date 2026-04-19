@@ -24,6 +24,7 @@ translator.py           Qt UI (SnippingToolWindow, TranslatorOverlay,
 bbox_visualizer.py      Thin wrapper — launches BBoxOnlyController (no translation)
 
 ocr_model.py            OCRBlock dataclass — the single data type for the whole pipeline
+tracking_utils.py       Pure bbox tracking helpers — IoU / overlap / same-track / occlusion
 block_merger.py         merge_blocks_by_proximity — pure Python, no platform deps
 color_sampler.py        Pixel color sampling from CGImage — macOS only, no-op elsewhere
 translator_engine.py    Thread-safe LRUCache (+ fuzzy get_or_similar) + raw engine dispatch
@@ -73,6 +74,7 @@ tests/                  pytest test suite (pure modules only — no Qt, no displ
   test_ocr_model.py           OCRBlock defaults and is_merged property
   test_language_descriptor.py LanguageDescriptor lookup by display name, flag values
   test_text_normalizer.py     CJK_PUNCT_MAP entries, normalize_ocr_text flag branches
+  test_tracking_utils.py      BBox overlap / same-track / occlusion decisions
 
 doc/                    Developer documentation
   architecture.md         Data flow, module responsibilities, design decisions
@@ -91,11 +93,13 @@ doc/                    Developer documentation
 
 - **Non-blocking OCR loop with state tracking.** `OCRWorker.run()` never
   waits on an API call. Each tick classifies OCR blocks in priority order:
-  (1) cache hit → emit immediately; (2) IoU > 0.8 + edit-distance < 2 match
-  against `_tracked` → reuse existing translation without re-translating;
+  (1) cache hit → emit immediately; (2) `tracking_utils.is_same_track()`
+  match against `_tracked` → reuse existing translation without re-translating;
   (3) no match → enqueue for the single persistent consumer thread (drop-old
-  strategy). Ghost rendering keeps blocks visible for `linger_frames` ticks
-  after OCR misses, preventing flicker from brief detection failures.
+  strategy). During tracked-state rebuild, blocks occluded by newer OCR at the
+  same location are dropped immediately; unmatched blocks become short-lived
+  ghosts for `linger_frames` ticks. Even on frame-diff skips, unconfirmed ghosts
+  keep aging out so stale boxes cannot stick indefinitely on identical frames.
 
 - **Cache key = normalized OCR text.** `TranslationPipeline._normalize()` applies
   NFC unicode composition, CJK punctuation canonicalization (`text_normalizer`), whitespace
@@ -112,8 +116,14 @@ doc/                    Developer documentation
   tolerates OCR character confusion (e.g. Korean `무`↔`우`, `얼`↔`멀`) that would
   otherwise bypass glossary protection entirely. Absolute error budget: 1 char
   for terms ≤3 chars, 2 chars for longer terms. A placeholder contamination guard
-  (`__` marker check) prevents Pass 1 substitutions from producing spurious
+  (`[[` marker check) prevents Pass 1 substitutions from producing spurious
   fuzzy matches in Pass 2.
+
+- **Placeholder format.** Glossary placeholders use `[[T{i}]]`; ASCII auto-protect
+  uses `[[E{i}]]`. `restore()` also accepts bracket-variant deformations produced by
+  some engines (`[T0]`, `[[ T0 ]]`, `[[T 0]]`) but explicitly rejects bare tokens
+  (`T0`, `T 0`). A final bracketed-fragment cleanup pass in `translation_pipeline.py`
+  recovers or removes any residual `[[T`/`[[E` fragments before the result is cached.
 
 - **Platform isolation.** All macOS-specific code lives in `capture/mac.py`,
   `ocr/mac.py`, and `color_sampler.py`. Windows-specific code lives in
@@ -153,7 +163,8 @@ doc/                    Developer documentation
 | `last_roi` | `[]` | Restored on next launch by `SnippingToolWindow` |
 | `min_confidence` | `0.0` | Drop Vision OCR blocks below this confidence (0 = off) |
 | `min_text_length` | `1` | Drop blocks shorter than N characters (1 = off) |
-| `linger_frames` | `3` | Ticks to ghost-render a block after OCR miss (3 × 0.2 s ≈ 0.6 s) |
+| `linger_frames` | `3` | Ticks to keep an unmatched block as a short-lived ghost after OCR miss; occluded boxes are dropped immediately |
+| `tracked_occlusion_threshold` | `0.5` | Fraction of an old bbox that a newer bbox must cover before the old tracked block is treated as replaced |
 | `merge_max_height_ratio` | `1.2` | Max row-height ratio to consider two blocks the same font size (`block_merger`) |
 | `merge_gap_ratio` | `0.8` | Vertical gap must be < avg\_height × this value to merge (`block_merger`) |
 | `merge_min_h_overlap` | `0.3` | Horizontal overlap must be ≥ this fraction of the narrower block's width (`block_merger`) |
@@ -169,7 +180,7 @@ doc/                    Developer documentation
 uv run python -m pytest tests/ -v
 ```
 
-All 142 tests cover 10 pure modules and run in ~0.13 s with no display.
+All 149 tests cover 11 pure modules and run in ~0.13 s with no display.
 The `dummy` engine (returns originals) is used in pipeline tests — no API key or network needed.
 Network calls in community_glossary tests are mocked with `unittest.mock.patch`.
 
@@ -193,6 +204,7 @@ automatically attached to the GitHub Release.
 ## Debugging
 
 - **Wrong bbox positions or bad merges** → `uv run bbox_visualizer.py`
+- **Old bbox lingers too long** → lower `linger_frames`; if the new OCR block overlaps the old one but is not replacing it aggressively enough, lower `tracked_occlusion_threshold` from `0.5`
 - **Wrong colors** → add `print` in `color_sampler._sample_block`, check `is_bgra` and `sx/sy`
 - **Translation not updating** → check `pipeline._cache` length; confirm `missing_texts` is non-empty
 - **Global hotkey not working** → macOS: uses Cocoa NSEvent monitors — requires Accessibility permission (System Settings → Privacy → Accessibility); check `config["hotkey_pause"]` syntax (`"<ctrl>+<alt>+p"`); console prints `[hotkey] ...` on error. Windows/Linux: pynput must be installed (`uv sync`)

@@ -116,8 +116,14 @@ doc/                    Developer documentation
   tolerates OCR character confusion (e.g. Korean `무`↔`우`, `얼`↔`멀`) that would
   otherwise bypass glossary protection entirely. Absolute error budget: 1 char
   for terms ≤3 chars, 2 chars for longer terms. A placeholder contamination guard
-  (`__` marker check) prevents Pass 1 substitutions from producing spurious
+  (`[[` marker check) prevents Pass 1 substitutions from producing spurious
   fuzzy matches in Pass 2.
+
+- **Placeholder format.** Glossary placeholders use `[[T{i}]]`; ASCII auto-protect
+  uses `[[E{i}]]`. `restore()` also accepts bracket-variant deformations produced by
+  some engines (`[T0]`, `[[ T0 ]]`, `[[T 0]]`) but explicitly rejects bare tokens
+  (`T0`, `T 0`). A final bracketed-fragment cleanup pass in `translation_pipeline.py`
+  recovers or removes any residual `[[T`/`[[E` fragments before the result is cached.
 
 - **Platform isolation.** All macOS-specific code lives in `capture/mac.py`,
   `ocr/mac.py`, and `color_sampler.py`. Windows-specific code lives in

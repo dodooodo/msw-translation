@@ -185,13 +185,13 @@ mapping multiple languages simultaneously.
 **Two pipeline roles:**
 
 - `protect(text, src, tgt, *, fuzzy_length_threshold, fuzzy_short_max_distance, fuzzy_long_max_distance)`
-  — two-pass replacement of source terms with `__T0__`, `__T1__` … before translation:
+  — two-pass replacement of source terms with `[[T0]]`, `[[T1]]` … before translation:
 
   - **Pass 1 (exact)** — `re.compile(re.escape(term))` match; fast, zero overhead for hits.
   - **Pass 2 (fuzzy)** — sliding window + `rapidfuzz.distance.Levenshtein` for entries
     that didn't match exactly. Error budget: `fuzzy_short_max_distance` for terms ≤
     `fuzzy_length_threshold` chars (default 1 error), `fuzzy_long_max_distance` for longer
-    terms (default 2 errors). Skips windows containing `__` (placeholder contamination guard).
+    terms (default 2 errors). Skips windows containing `[[` (placeholder contamination guard).
 
   Returns `(protected_text, {placeholder: target_term})`.
 
@@ -397,7 +397,7 @@ QLineEdit
     │  user types text (target language) and presses Enter or "翻譯"
     ▼
 _on_submit()
-    │  glossary protect: known target terms → __Tn__ placeholders
+    │  glossary protect: known target terms → [[Tn]] placeholders
     │  engine_translate([protected], reversed config)  ← synchronous; blocks briefly
     │  glossary restore: placeholders → source terms
     ▼
