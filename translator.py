@@ -27,34 +27,12 @@ from ocr_model           import OCRBlock
 from config_manager      import load_config, save_config
 from settings_ui         import SettingsDialog
 from hotkey_listener     import HotkeyListener
+from tracking_utils      import bbox_iou, is_same_track, should_drop_tracked_block
 
 
 # ---------------------------------------------------------------------------
 # State tracking helpers (pure Python, no Qt deps)
 # ---------------------------------------------------------------------------
-
-def _iou(b1: tuple, b2: tuple) -> float:
-    """Intersection-over-Union for (x, y, w, h) bounding boxes."""
-    x1, y1, w1, h1 = b1
-    x2, y2, w2, h2 = b2
-    ix = max(0.0, min(x1 + w1, x2 + w2) - max(x1, x2))
-    iy = max(0.0, min(y1 + h1, y2 + h2) - max(y1, y2))
-    inter = ix * iy
-    union = w1 * h1 + w2 * h2 - inter
-    return inter / union if union > 0 else 0.0
-
-
-def _edit_distance(s1: str, s2: str) -> int:
-    """Levenshtein distance; clamps at 2 for fast rejection."""
-    if abs(len(s1) - len(s2)) >= 2:
-        return 2
-    dp = list(range(len(s2) + 1))
-    for i, c1 in enumerate(s1, 1):
-        prev, dp[0] = dp[0], i
-        for j, c2 in enumerate(s2, 1):
-            prev, dp[j] = dp[j], prev if c1 == c2 else 1 + min(prev, dp[j], dp[j - 1])
-    return dp[len(s2)]
-
 
 @dataclass
 class _TrackedBlock:
@@ -62,6 +40,7 @@ class _TrackedBlock:
     block:       OCRBlock   # last confirmed state (bbox, text, colors)
     translation: str        # last confirmed translation
     ttl:         int        # ticks remaining before ghost expires
+    confirmed:   bool = True  # True if OCR confirmed it on the latest processed frame
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +64,8 @@ class OCRWorker(QThread):
                                                 ["ko-KR"])
         self._tracked:      list[_TrackedBlock] = []
         self._tracked_lock: threading.Lock      = threading.Lock()
+        self._latest_seen:  list[OCRBlock]      = []
+        self._latest_seen_lock: threading.Lock  = threading.Lock()
         self._custom_words: list[str]           = self._build_custom_words()
         self.overlay_win_id: int | None = None
 
@@ -121,6 +102,24 @@ class OCRWorker(QThread):
         """Refresh OCR custom-word hints after glossary changes."""
         self._custom_words = self._build_custom_words()
 
+    def _decay_ghosts_on_skipped_frame(self) -> list[OCRBlock] | None:
+        """Age out ghost blocks when we skip OCR on an identical frame."""
+        with self._tracked_lock:
+            changed = False
+            kept: list[_TrackedBlock] = []
+            for t in self._tracked:
+                if t.confirmed:
+                    kept.append(t)
+                    continue
+                t.ttl -= 1
+                changed = True
+                if t.ttl > 0:
+                    kept.append(t)
+            if not changed:
+                return None
+            self._tracked = kept
+            return [t.block for t in self._tracked]
+
     def run(self) -> None:
         # Start the single translation consumer thread
         self._translator_thread = threading.Thread(
@@ -143,6 +142,9 @@ class OCRWorker(QThread):
             # ---- Frame-diff skip: reuse last tick if pixels are identical ----
             fp = self._capture.fingerprint(image)
             if fp is not None and fp == self._last_fingerprint and self._tracked:
+                render_now = self._decay_ghosts_on_skipped_frame()
+                if render_now is not None:
+                    self.result_ready.emit(render_now)
                 time.sleep(interval)
                 continue
             self._last_fingerprint = fp
@@ -170,8 +172,11 @@ class OCRWorker(QThread):
                 and len(b.text.strip()) >= min_len
                 and has_source_content(b.text, source_lang)
             ]
+            with self._latest_seen_lock:
+                self._latest_seen = list(blocks)
 
             linger_frames = self.config.get("linger_frames", 3)
+            occlusion_threshold = self.config.get("tracked_occlusion_threshold", 0.5)
 
             # ---- Classify each block: cache hit / state match / new ----
             fresh_translated: list[OCRBlock] = []   # ready to render immediately
@@ -190,8 +195,7 @@ class OCRWorker(QThread):
                 with self._tracked_lock:
                     match = next(
                         (t for t in self._tracked
-                         if _iou(b.bbox, t.block.bbox) > 0.8
-                         and _edit_distance(b.text, t.block.text) < 2),
+                         if is_same_track(b.bbox, b.text, t.block.bbox, t.block.text)),
                         None
                     )
                 if match is not None:
@@ -207,12 +211,22 @@ class OCRWorker(QThread):
             with self._tracked_lock:
                 new_tracked: list[_TrackedBlock] = []
                 for b in fresh_translated:
-                    new_tracked.append(_TrackedBlock(b, b.translated, linger_frames))
+                    new_tracked.append(_TrackedBlock(
+                        b, b.translated, linger_frames, confirmed=True
+                    ))
                 for t in self._tracked:
-                    if self.pipeline._normalize(t.block.text) not in matched_norm:
-                        t.ttl -= 1
-                        if t.ttl > 0:
-                            new_tracked.append(t)   # ghost: keep rendering last known state
+                    if self.pipeline._normalize(t.block.text) in matched_norm:
+                        continue
+                    if should_drop_tracked_block(
+                        t.block,
+                        blocks,
+                        occlusion_threshold=occlusion_threshold,
+                    ):
+                        continue
+                    t.ttl -= 1
+                    if t.ttl > 0:
+                        t.confirmed = False
+                        new_tracked.append(t)   # ghost: keep rendering last known state
                 self._tracked = new_tracked
                 render_now = [t.block for t in self._tracked]
 
@@ -251,12 +265,31 @@ class OCRWorker(QThread):
 
             # Add newly translated blocks to _tracked, then emit full state
             linger_frames = self.config.get("linger_frames", 3)
+            occlusion_threshold = self.config.get("tracked_occlusion_threshold", 0.5)
+            with self._latest_seen_lock:
+                latest_seen = list(self._latest_seen)
             with self._tracked_lock:
                 for b in new_blocks:
+                    if should_drop_tracked_block(
+                        b,
+                        latest_seen,
+                        occlusion_threshold=occlusion_threshold,
+                    ):
+                        continue
                     cached = self.pipeline.get_cached(b.text)
                     if cached:
                         b.translated = cached
-                        self._tracked.append(_TrackedBlock(b, cached, linger_frames))
+                        self._tracked = [
+                            t for t in self._tracked
+                            if not (
+                                bbox_iou(b.bbox, t.block.bbox) > 0.8
+                                and self.pipeline._normalize(b.text)
+                                == self.pipeline._normalize(t.block.text)
+                            )
+                        ]
+                        self._tracked.append(_TrackedBlock(
+                            b, cached, linger_frames, confirmed=True
+                        ))
                 render = [t.block for t in self._tracked]
             self.result_ready.emit(render)   # emit #2: after translation, includes ghosts
 

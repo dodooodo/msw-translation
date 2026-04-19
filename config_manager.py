@@ -17,6 +17,7 @@ DEFAULT_CONFIG = {
     "min_confidence":    0.0,    # drop Vision OCR blocks below this confidence (0 = off)
     "min_text_length":   1,      # drop blocks shorter than this many characters (1 = off)
     "linger_frames":     3,      # ticks to ghost-render a block after OCR miss (3×0.2s ≈ 0.6s)
+    "tracked_occlusion_threshold": 0.5,  # drop tracked block when newer OCR covers this fraction
     # Block merger thresholds
     "merge_max_height_ratio": 1.2,  # max row-height ratio to consider same font size
     "merge_gap_ratio":        0.8,  # vertical gap must be < avg_height × this value

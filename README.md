@@ -174,7 +174,16 @@ Vertical gap must be < `avg_height × ratio` for blocks to merge.
 Minimum horizontal overlap (fraction of the narrower block's width) to merge vertically adjacent blocks.
 
 ### `linger_frames` (default: `3`)
-Ticks to ghost-render a block after OCR miss (~0.6 s at default interval).
+Ticks to keep an unmatched block as a short-lived ghost after an OCR miss
+(~0.6 s at default interval). If a newer bbox clearly covers the old one,
+the old bbox is dropped immediately instead of waiting for TTL to expire.
+
+### `tracked_occlusion_threshold` (default: `0.5`)
+How much of an old bbox must be covered by a newer bbox before the old tracked
+block is treated as replaced and removed immediately.
+- `0.5` — balanced default
+- lower values — more aggressive cleanup of overlapping stale boxes
+- higher values — more conservative; may keep overlapping ghosts longer
 
 ### `hotkey_pause` (default: `"<ctrl>+<alt>+p"`)
 Global keyboard shortcut to pause/resume OCR from inside a fullscreen game — no
@@ -236,6 +245,7 @@ translation_pipeline.py Full pre→translate→post pipeline
 community_glossary.py   Community glossary fetch (GitHub)
 language_descriptor.py  Per-language flags (asian, space-remover, …)
 text_normalizer.py      CJK punctuation normalizer for cache keys
+tracking_utils.py       Pure bbox tracking helpers for same-track / occlusion decisions
 hotkey_listener.py      Global pause hotkey (NSEvent on macOS, pynput on Win/Linux → Qt signal)
 
 capture/                Platform screenshot abstraction

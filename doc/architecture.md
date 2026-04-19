@@ -262,19 +262,31 @@ Thin QThread that orchestrates the pure modules.
 
 **State tracking (`_tracked: list[_TrackedBlock]`):**
 Each `_TrackedBlock` stores the last confirmed `OCRBlock`, its translation, and a
-TTL countdown. Shared between the main loop and the consumer thread under `_tracked_lock`.
+TTL countdown. A `confirmed` flag distinguishes blocks seen on the latest OCR pass
+from ghost-only survivors so identical no-text frames can continue aging ghosts out
+without deleting stable, still-visible text. Shared between the main loop and the
+consumer thread under `_tracked_lock`.
 
 **Per-tick classification (priority order):**
 1. `capture.grab()` + `ocr.recognize(custom_words=…)` + `annotate_colors()` + `merge_blocks()`
 2. For each block: `pipeline.get_cached(text)` — O(1) cache hit → emit immediately
-3. **Mechanism 3 — Spatio-temporal match:** IoU > 0.8 AND edit-distance < 2 against
-   `_tracked` → reuse existing translation, skip re-translation
+3. **Mechanism 3 — Spatio-temporal match:** `tracking_utils.is_same_track()` (IoU > 0.8
+   AND edit-distance ≤ 1) against `_tracked` → reuse existing translation, skip re-translation
 4. No match → enqueue for consumer thread (drop-old strategy)
 
-**Mechanism 4 — TTL ghost rendering:**
-After matching, `_tracked` is rebuilt: fresh hits get full `linger_frames` TTL; unmatched
-tracked blocks are decremented and kept until TTL reaches 0. Render = all entries still
-alive in `_tracked`, including ghosts. This prevents flicker from brief OCR misses.
+**Mechanism 4 — occlusion-aware ghost rendering:**
+After matching, `_tracked` is rebuilt: fresh hits get full `linger_frames` TTL; any older
+tracked block that is significantly covered by a newer OCR bbox is dropped immediately via
+`tracking_utils.should_drop_tracked_block()` (`tracked_occlusion_threshold`, default 0.5).
+Only unmatched, non-occluded tracked blocks are decremented and kept until TTL reaches 0.
+Render = all entries still alive in `_tracked`, including ghosts. This prevents flicker
+from brief OCR misses without letting overlapping stale boxes linger.
+
+**Frame-diff skip aging:**
+If `capture.fingerprint()` reports the same pixels as the previous processed frame, OCR is
+skipped entirely. Confirmed blocks are kept as-is, but ghost-only blocks still have TTL
+decremented so a static no-text frame can clear stale overlay content within `linger_frames`
+ticks instead of leaving it visible indefinitely.
 
 **Drop-old strategy:**
 If a new OCR tick arrives while the consumer is still translating, the pending job slot is
@@ -334,12 +346,20 @@ for each block:
         exact hit  → O(1) cache lookup → fresh_translated.append(block)
         fuzzy hit  → rapidfuzz scan (last 64 MRU, threshold 95%/90%)
                      → warms exact key → fresh_translated.append(block)
-        miss → spatio-temporal match in _tracked (IoU > 0.8 + edit-dist < 2)
+        miss → spatio-temporal match in _tracked (IoU > 0.8 + edit-dist ≤ 1)
                    match → reuse tracked.translation (no re-translate)
                    no match → new_blocks / missing
 
-_tracked rebuilt: fresh hits (full TTL) + ghost survivors (TTL-1, TTL>0)
+_tracked rebuilt:
+    fresh hits → full TTL, confirmed=True
+    occluded stale tracks → drop immediately
+    unmatched survivors → TTL-1, confirmed=False, keep if TTL>0
 emit result_ready(render_now)          ← fresh + state matches + ghosts
+
+if capture fingerprint unchanged:
+    skip OCR entirely
+    decrement TTL only for confirmed=False ghost entries
+    emit result_ready(render_now) if any ghosts changed/expired
 
 [single consumer thread]  ← replaces stale pending job (drop-old)
     pipeline.translate_missing(missing_texts)
@@ -350,6 +370,7 @@ emit result_ready(render_now)          ← fresh + state matches + ghosts
         glossary.correct(result)
         cache.put(normalized_text, final_result)
     appends new _TrackedBlock entries to _tracked (under lock)
+    but skips any late result now occluded by newer OCR content
 
 emit result_ready(render_complete)     ← new translations + all ghosts
 
@@ -404,7 +425,7 @@ _result_row.show()
 Pure modules have no Qt or platform dependencies and can be tested without a display:
 
 ```bash
-uv run python -m pytest tests/ -v   # 142 tests, ~0.12 s
+uv run python -m pytest tests/ -v   # 149 tests, ~0.12 s
 ```
 
 | Test file | Module under test | Key scenarios |
@@ -413,6 +434,7 @@ uv run python -m pytest tests/ -v   # 142 tests, ~0.12 s
 | `tests/test_glossary_service.py` | `GlossaryService` | CRUD, protect/restore roundtrip, fuzzy fallback (1 and 2 OCR errors), placeholder contamination, persistence |
 | `tests/test_translation_pipeline.py` | `TranslationPipeline` | cache warmup, clear_cache, glossary integration |
 | `tests/test_block_merger.py` | `merge_blocks_by_proximity` | merge conditions, threshold boundaries, bbox math |
+| `tests/test_tracking_utils.py` | `tracking_utils` | bbox overlap, same-track detection, occlusion replacement decisions |
 | `tests/test_config_manager.py` | `load_config` / `save_config` | defaults, key merging, malformed JSON fallback |
 | `tests/test_community_glossary.py` | `community_glossary` | parse_entries edge cases; fetch_index/fetch_glossary (mocked urllib) |
 | `tests/test_update_checker.py` | `_version_tuple` | parsing, comparison (pure function, no Qt) |
